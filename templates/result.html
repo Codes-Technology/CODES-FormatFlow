@@ -11,10 +11,10 @@
 </head>
 
 <body>
-
     <div class="main-wrapper">
         <div class="centered-container">
             <div class="glass-card">
+
                 {% if success %}
                 <div class="text-center">
                     <div class="success-icon"><i class="fas fa-check-circle"></i></div>
@@ -24,29 +24,9 @@
 
                 <div class="info-box">
                     <div class="info-item">
-                        <span><strong>Original Source:</strong></span>
-                        <span>{{ original_filename }}</span>
-                    </div>
-
-                    {% if file_count > 1 %}
-                    <div class="info-item">
-                        <span><strong>Files Merged:</strong></span>
-                        <span class="badge bg-info text-dark">{{ file_count }} files</span>
-                    </div>
-                    {% endif %}
-
-                    <div class="info-item">
                         <span><strong>Output File:</strong></span>
                         <span>{{ filename }}</span>
                     </div>
-
-                    {% if tables_found is defined and tables_found > 0 %}
-                    <div class="info-item">
-                        <span><strong>Tables Found:</strong></span>
-                        <span class="badge bg-primary">{{ tables_found }}</span>
-                    </div>
-                    {% endif %}
-
                     <div class="info-item">
                         <span><strong>Status:</strong></span>
                         <span class="text-success">✓ Ready</span>
@@ -55,13 +35,9 @@
 
                 <div class="text-center mt-4">
                     <h5 class="mb-3">📥 Download Options</h5>
-
-                    <!-- DOCX Download -->
                     <a href="{{ url_for('download_file', filename=filename) }}" class="btn btn-download">
                         <i class="fas fa-file-word me-2"></i>Download as Word (.docx)
                     </a>
-
-                    <!-- PDF Download -->
                     <a href="{{ url_for('download_pdf', filename=filename) }}" class="btn btn-download btn-pdf">
                         <i class="fas fa-file-pdf me-2"></i>Download as PDF (.pdf)
                     </a>
@@ -81,19 +57,20 @@
                         </a>
                     </small>
                 </div>
+
                 {% else %}
                 <div class="text-center">
                     <div style="font-size: 80px; color: #dc3545;"><i class="fas fa-times-circle"></i></div>
                     <h1 class="mt-3 mb-2" style="color: #dc3545;">Processing Failed</h1>
                     <p class="text-muted">There was an error processing your document</p>
                 </div>
-
                 <div class="text-center mt-4">
                     <a href="{{ url_for('index') }}" class="btn btn-back">
                         <i class="fas fa-arrow-left me-2"></i>Back to Upload
                     </a>
                 </div>
                 {% endif %}
+
             </div>
         </div>
     </div>

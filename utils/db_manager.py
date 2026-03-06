@@ -1,15 +1,22 @@
+import os
 import mysql.connector
 import uuid
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load variables from .env into the environment
+load_dotenv()
 
 class DatabaseManager:
     def __init__(self):
+
+        db_password = os.environ.get('DB_PASSWORD')
         # Update with your root password
         self.config = {
-            'user': 'root',
-            'password': '$@9176@Codes', 
-            'host': '127.0.0.1',
-            'database': 'document_api'
+            'user': os.getenv('DB_USER'),
+            'password': os.getenv('DB_PASSWORD'), 
+            'host': os.getenv('DB_HOST'),
+            'database': os.getenv('DB_DATABASE')
         }
 
     def get_connection(self):

@@ -1,27 +1,23 @@
+# Flask Framework
 Flask==3.0.0
 Werkzeug==3.0.1
 
-# PDF to Word conversion with table support
+# Document Processing - WORKING VERSIONS
+python-docx==1.1.0
 pdf2docx==0.5.8
 
-# Word document manipulation
-python-docx==1.1.0
-
-# Fallback table extraction from PDFs
-pdfplumber==0.11.0
-
-# Additional dependencies
-Pillow==10.1.0
+# PDF Tools
 PyMuPDF==1.23.8
 
-# PDF generation from DOCX
+# Image Processing
+Pillow==10.1.0
+
+# PDF Generation
 docx2pdf==0.1.8
 
-# AI Summary
+# AI Summary (for cover page)
 ollama==0.1.6
 
-# Batch processing
-docxcompose==1.4.0
+# Additional
+python-dateutil==2.8.2
 
-# Database Connection (Added for API Tracking)
-mysql-connector-python==9.6.0

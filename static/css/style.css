@@ -14,38 +14,47 @@ body {
     padding: 0;
     font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
     background: url('../img/bgimage.png') no-repeat center center fixed;
-    /* New background */
     background-size: cover;
     background-color: #BBDEFB;
-    /* Fallback blue */
     height: 100vh;
+    width: 100vw;
     overflow: hidden;
 }
 
 .main-wrapper {
     height: 100vh;
-    width: 100vw;
+    width: 100%;
     display: flex;
     justify-content: center;
-    align-items: center;
+    align-items: center; /* Keeps everything centered and visible */
 }
 
 .centered-container {
-    width: 100%;
-    max-width: 900px;
-    padding: 20px;
+    width: 95%;
+    max-width: 1000px; /* slightly reduced */
     z-index: 2;
 }
 
-/* Glassmorphism Card ("Rectangle in between") */
 .glass-card {
     background: var(--bg-overlay);
     backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
     border-radius: 20px;
-    padding: 40px;
-    box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.15);
+    padding: 20px;
+    box-shadow: 0 8px 32px rgba(31, 38, 135, 0.15);
     border: 1px solid rgba(255, 255, 255, 0.4);
+     
+    min-height: 580px;
+    height: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+}
+
+.glass-card form {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    justify-content: space-between;
 }
 
 .brand-header h2 {
@@ -54,27 +63,78 @@ body {
     letter-spacing: -0.5px;
 }
 
-.custom-textarea {
-    border: 2px solid #90CAF9;
-    /* Soft blue border */
-    border-radius: 12px;
-    padding: 15px;
-    font-size: 1rem;
-    transition: all 0.3s ease;
-    resize: vertical;
-    background: rgba(255, 255, 255, 0.9);
+.brand-header {
+    margin-bottom: 15px !important;
 }
 
-.custom-textarea:focus {
-    border-color: #1976D2;
-    box-shadow: 0 0 0 3px rgba(25, 118, 210, 0.2);
-    outline: none;
+.brand-header p {
+    margin-bottom: 8px;
+    font-size: 14px;
+}
+
+.custom-textarea {
+    height: 260px;
+    max-height: 260px;
+    overflow-y: auto;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    display: block;
+    border: 2px solid #90CAF9;
+    border-radius: 12px;
+    padding: 12px;
+    background: #fff;
+}
+
+/* Visual feedback for file dragging */
+.custom-textarea.drag-over {
+    border: 2px dashed #1976D2;
+    background: rgba(25, 118, 210, 0.05);
+}
+
+.editor-toolbar {
+    display: flex;
+    gap: 5px;
+    background: #f8f9fa;
+    padding: 8px;
+    border-radius: 12px 12px 0 0;
+    border: 1px solid #90CAF9;
+    border-bottom: none;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.editor-toolbar .btn {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+}
+
+/* Controlled Placeholder */
+.custom-textarea.show-placeholder::before {
+    content: attr(data-placeholder);
+    color: #90A4AE;
+    pointer-events: none;
+    display: block;
+}
+
+#rich-editor table {
+    width: 100% !important;
+    border-collapse: collapse;
+    margin: 10px 0;
+}
+#rich-editor td {
+    border: 1px solid #ddd;
+    padding: 5px;
 }
 
 .upload-area {
+    padding: 68px 15px;
     border: 2px dashed #90CAF9;
-    border-radius: 0;
-    padding: 30px 20px;
+    border-radius: 12px;
     text-align: center;
     cursor: pointer;
     transition: all 0.3s ease;
@@ -97,6 +157,10 @@ body {
 
 .upload-area:hover .upload-icon {
     color: #1565C0;
+}
+.file-list {
+    max-height: 90px;
+    overflow-y: auto;
 }
 
 .btn-process {
@@ -223,4 +287,62 @@ body {
     padding: 10px;
     border-radius: 5px;
     margin-top: 10px;
+}
+
+/* ── Input Mode Toggle ── */
+.mode-selector {
+    display: flex;
+    gap: 12px;
+    background: rgba(255,255,255,0.5);
+    border-radius: 14px;
+    padding: 6px;
+    border: 1px solid #90CAF9;
+}
+
+.mode-option {
+    flex: 1;
+    text-align: center;
+}
+
+.mode-option input[type="radio"] {
+    display: none;
+}
+
+.mode-option label {
+    display: block;
+    padding: 10px 16px;
+    border-radius: 10px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    color: #546E7A;
+    transition: all 0.25s ease;
+    user-select: none;
+    margin: 0;
+}
+
+.mode-option input[type="radio"]:checked + label {
+    background: var(--primary-gradient);
+    color: white;
+    box-shadow: 0 4px 12px rgba(21, 101, 192, 0.3);
+}
+
+.mode-option label:hover {
+    background: rgba(25, 118, 210, 0.08);
+    color: var(--primary-color);
+}
+
+/* ── Panel show/hide ── */
+.input-panel {
+    display: none;
+    animation: fadeIn 0.2s ease;
+}
+
+.input-panel.active {
+    display: block;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }

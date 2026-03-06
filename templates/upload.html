@@ -11,190 +11,295 @@
 </head>
 
 <body>
-
     <div class="main-wrapper">
         <div class="centered-container">
             <div class="glass-card">
+
+                <!-- Brand Header -->
                 <div class="brand-header text-center mb-4">
                     <a href="https://www.codestechnology.com/" target="_blank"
-                        style="text-decoration: none; color: inherit; display: inline-block; position: relative; z-index: 10;">
-                        <h2><img src="{{ url_for('static', filename='img/icon.png') }}" alt="Prisma Logo" class="me-2"
-                                style="height: 36px; vertical-align: middle;">Prisma</h2>
+                        style="text-decoration: none; color: inherit; display: inline-block;">
+                        <h2>
+                            <img src="{{ url_for('static', filename='img/icon.png') }}"
+                                 alt="Prisma Logo" class="me-2"
+                                 style="height: 36px; vertical-align: middle;">Prisma
+                        </h2>
                     </a>
-                    <p class="text-muted">Combine text & files into one professional document</p>
+                    <p class="text-muted">Transform your content into a professional document</p>
                 </div>
 
+                <!-- Flash Messages -->
                 {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
-                {% for category, message in messages %}
-                <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show"
-                    role="alert">
-                    {{ message }}
-                    <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-                </div>
-                {% endfor %}
+                    {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                    {% endfor %}
                 {% endif %}
                 {% endwith %}
 
                 <form id="unifiedForm" enctype="multipart/form-data">
 
-                    <!-- 1. Text Input -->
-                    <div class="input-group-custom mb-4">
-                        <label class="form-label"><i class="fas fa-keyboard me-2"></i>Type or Paste Text</label>
-                        <textarea class="form-control custom-textarea" name="text_input" rows="4"
-                            placeholder="Enter your content here... (Headings, paragraphs, etc.)"></textarea>
-                    </div>
-
-                    <!-- 2. File Upload -->
-                    <div class="input-group-custom mb-4">
-                        <label class="form-label"><i class="fas fa-cloud-upload-alt me-2"></i>Upload Files (PDF,
-                            DOCX)</label>
-                        <div class="upload-area" id="uploadArea">
-                            <div class="upload-icon"><i class="fas fa-plus-circle"></i></div>
-                            <h5>Drag & Drop or Click</h5>
-                            <p class="text-muted small">Supports multiple files</p>
-                            <input type="file" name="files[]" id="fileInput" multiple accept=".pdf,.docx,.txt"
-                                style="display: none;">
+                    <!-- ── Step 1: Choose input mode ── -->
+                    <div class="mode-selector mb-4">
+                        <div class="mode-option">
+                            <input type="radio" name="input_mode" id="modeText" value="text" checked>
+                            <label for="modeText">
+                                <i class="fas fa-keyboard me-2"></i>Type or Paste Text
+                            </label>
                         </div>
-                        <div id="fileList" class="file-list mt-3"></div>
+                        <div class="mode-option">
+                            <input type="radio" name="input_mode" id="modeFile" value="file">
+                            <label for="modeFile">
+                                <i class="fas fa-file-upload me-2"></i>Upload File
+                            </label>
+                        </div>
                     </div>
 
-                    <!-- Action Button -->
+                    <!-- ── Panel A: Text Editor ── -->
+                    <div class="input-panel active" id="panelText">
+                        <div class="input-group-custom mb-4">
+                            <label class="form-label">
+                                <i class="fas fa-keyboard me-2"></i>Documentation Editor
+                            </label>
+                            <div class="editor-toolbar mb-2">
+                                <button type="button" class="btn btn-sm btn-light border" onclick="execCmd('bold')">
+                                    <i class="fas fa-bold"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-light border" onclick="execCmd('italic')">
+                                    <i class="fas fa-italic"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-light border" onclick="execCmd('insertUnorderedList')">
+                                    <i class="fas fa-list-ul"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-light border" onclick="execCmd('formatBlock', 'H2')">H</button>
+                            </div>
+                            <div id="rich-editor"
+                                class="custom-textarea"
+                                contenteditable="true"
+                                data-placeholder="💡 Paste ChatGPT, Gemini or AI-formatted content here. Headings, bullets and formatting will be preserved.">
+                            </div>
+                            <input type="hidden" name="text_input" id="hidden_text_input">
+                        </div>
+                    </div>
+
+                    <!-- ── Panel B: File Upload ── -->
+                    <div class="input-panel" id="panelFile">
+                        <div class="input-group-custom mb-4">
+                            <label class="form-label">
+                                <i class="fas fa-cloud-upload-alt me-2"></i>Upload File (PDF, DOCX)
+                            </label>
+                            <div class="upload-area" id="uploadArea">
+                                <div class="upload-icon"><i class="fas fa-plus-circle"></i></div>
+                                <h5>Drag & Drop or Click to Browse</h5>
+                                <p class="text-muted small">Supports PDF and DOCX</p>
+                                <input type="file" name="files[]" id="fileInput"
+                                       accept=".pdf,.docx,.txt" style="display: none;">
+                            </div>
+                            <div id="fileList" class="file-list mt-3"></div>
+                        </div>
+                    </div>
+
+                    <!-- ── Document Options (shared for both modes) ── -->
+                    <div class="input-group-custom mb-4">
+                        <label class="form-label">
+                            <i class="fas fa-sliders-h me-2"></i>Document Options
+                        </label>
+                        <div class="d-flex gap-4 flex-wrap">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox"
+                                       id="includeCover" name="include_cover" value="true">
+                                <label class="form-check-label" for="includeCover">
+                                    <i class="fas fa-file-alt me-1"></i>Cover Page
+                                </label>
+                            </div>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox"
+                                       id="includeToc" name="include_toc" value="true">
+                                <label class="form-check-label" for="includeToc">
+                                    <i class="fas fa-list me-1"></i>Table of Contents
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- ── Submit ── -->
                     <div class="d-grid">
-                        <button type="submit" class="btn btn-primary btn-lg btn-block btn-process" id="processBtn">
-                            <span class="spinner-border spinner-border-sm d-none me-2" role="status"
-                                aria-hidden="true"></span>
-                            <i class="fas fa-magic me-2"></i>Process & Merge Everything
+                        <button type="submit" class="btn btn-primary btn-lg btn-process" id="processBtn">
+                            <span class="spinner-border spinner-border-sm d-none me-2"
+                                  role="status" aria-hidden="true"></span>
+                            <i class="fas fa-magic me-2"></i>Process & Generate Document
                         </button>
                     </div>
+
                 </form>
+
+                <div class="mt-3 text-center">
+                    <small class="text-muted" style="font-weight: bold; letter-spacing: 1px;">
+                        <a href="https://www.codestechnology.com/" target="_blank"
+                            style="text-decoration: none; color: inherit;">
+                            BY CO<span style="color: #42A5F5;">D</span>ES TECHNOLOGY
+                        </a>
+                    </small>
+                </div>
+
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('fileInput');
-        const fileList = document.getElementById('fileList');
-        const form = document.getElementById('unifiedForm');
-        const processBtn = document.getElementById('processBtn');
+        // ── Element refs ──
+        const form        = document.getElementById('unifiedForm');
+        const processBtn  = document.getElementById('processBtn');
+        const editor      = document.getElementById('rich-editor');
+        const hiddenInput = document.getElementById('hidden_text_input');
+        const uploadArea  = document.getElementById('uploadArea');
+        const fileInput   = document.getElementById('fileInput');
+        const fileList    = document.getElementById('fileList');
+        const panelText   = document.getElementById('panelText');
+        const panelFile   = document.getElementById('panelFile');
 
-        // Click handler
+        // ── 1. Mode toggle ──
+        document.querySelectorAll('input[name="input_mode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                if (radio.value === 'text') {
+                    panelText.classList.add('active');
+                    panelFile.classList.remove('active');
+                } else {
+                    panelFile.classList.add('active');
+                    panelText.classList.remove('active');
+                }
+            });
+        });
+
+        // ── 2. Editor helpers ──
+        function execCmd(command, value = null) {
+            document.execCommand(command, false, value);
+            editor.focus();
+        }
+
+        function updatePlaceholder() {
+            editor.classList.toggle('show-placeholder', !editor.innerText.trim());
+        }
+
+        editor.addEventListener('input',  updatePlaceholder);
+        editor.addEventListener('blur',   updatePlaceholder);
+        editor.addEventListener('focus',  updatePlaceholder);
+        updatePlaceholder();
+
+        editor.addEventListener('dragover', e => {
+            e.preventDefault();
+            editor.classList.add('drag-over');
+        });
+        editor.addEventListener('dragleave', () => editor.classList.remove('drag-over'));
+        editor.addEventListener('drop', e => {
+            e.preventDefault();
+            editor.classList.remove('drag-over');
+            const file = e.dataTransfer.files[0];
+            if (file && (file.type === 'text/plain' || file.name.endsWith('.txt'))) {
+                const reader = new FileReader();
+                reader.onload = ev => {
+                    editor.innerHTML += '<p>' + ev.target.result.replace(/\n/g, '<br>') + '</p>';
+                };
+                reader.readAsText(file);
+            }
+        });
+
+        // ── 3. File upload area ──
         uploadArea.addEventListener('click', () => fileInput.click());
 
-        // Drag and drop handlers
-        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
-            uploadArea.addEventListener(eventName, preventDefaults, false);
+        ['dragenter','dragover','dragleave','drop'].forEach(name => {
+            uploadArea.addEventListener(name, e => { e.preventDefault(); e.stopPropagation(); });
         });
+        ['dragenter','dragover'].forEach(n =>
+            uploadArea.addEventListener(n, () => uploadArea.classList.add('dragover')));
+        ['dragleave','drop'].forEach(n =>
+            uploadArea.addEventListener(n, () => uploadArea.classList.remove('dragover')));
 
-        function preventDefaults(e) {
-            e.preventDefault();
-            e.stopPropagation();
-        }
-
-        ['dragenter', 'dragover'].forEach(eventName => {
-            uploadArea.addEventListener(eventName, highlight, false);
+        uploadArea.addEventListener('drop', e => {
+            fileInput.files = e.dataTransfer.files;
+            handleFiles(e.dataTransfer.files);
         });
-
-        ['dragleave', 'drop'].forEach(eventName => {
-            uploadArea.addEventListener(eventName, unhighlight, false);
-        });
-
-        function highlight(e) {
-            uploadArea.classList.add('dragover');
-        }
-
-        function unhighlight(e) {
-            uploadArea.classList.remove('dragover');
-        }
-
-        uploadArea.addEventListener('drop', handleDrop, false);
-
-        function handleDrop(e) {
-            const dt = e.dataTransfer;
-            const files = dt.files;
-            handleFiles(files);
-            // Also update input files
-            fileInput.files = files;
-        }
-
-        fileInput.addEventListener('change', function () {
-            handleFiles(this.files);
-        });
+        fileInput.addEventListener('change', function () { handleFiles(this.files); });
 
         function handleFiles(files) {
             fileList.innerHTML = '';
-
-            if (files.length > 0) {
-                const list = document.createElement('ul');
-                list.className = 'list-group';
-
-                Array.from(files).forEach(file => {
-                    const li = document.createElement('li');
-                    li.className = 'list-group-item d-flex justify-content-between align-items-center';
-                    li.innerHTML = `
-                        <span><i class="far fa-file me-2"></i>${file.name}</span>
-                        <span class="badge bg-primary rounded-pill">${(file.size / 1024).toFixed(1)} KB</span>
-                    `;
-                    list.appendChild(li);
-                });
-
-                fileList.appendChild(list);
-
-                // Visual feedback
-                uploadArea.classList.add('border-success');
-                uploadArea.style.backgroundColor = '#f0fff4';
-            }
+            if (!files.length) return;
+            const list = document.createElement('ul');
+            list.className = 'list-group';
+            Array.from(files).forEach(file => {
+                const li = document.createElement('li');
+                li.className = 'list-group-item d-flex justify-content-between align-items-center';
+                li.innerHTML = `<span><i class="far fa-file me-2"></i>${file.name}</span>
+                                <span class="badge bg-primary rounded-pill">${(file.size/1024).toFixed(1)} KB</span>`;
+                list.appendChild(li);
+            });
+            fileList.appendChild(list);
+            uploadArea.classList.add('border-success');
+            uploadArea.style.backgroundColor = '#f0fff4';
         }
 
-        // Form submission
-        // API Integration: Form submission
+        // ── 4. Form submission ──
         form.addEventListener('submit', async function (e) {
-            // 1. Stop the browser from reloading the page
-            e.preventDefault(); 
-            
-            // 2. Show the loading spinner
+            e.preventDefault();
+
+            const mode = document.querySelector('input[name="input_mode"]:checked').value;
+
+            if (mode === 'text') {
+                // Clean editor
+                let html = editor.innerHTML.trim();
+                html = html.replace(/^(<div><br><\/div>|<p><br><\/p>|<br>)+/i, '');
+                editor.innerHTML = html;
+                hiddenInput.value = editor.innerHTML.trim();
+
+                if (!editor.innerText.trim()) {
+                    alert('Please enter some text before processing.');
+                    return;
+                }
+            } else {
+                hiddenInput.value = '';
+                if (!fileInput.files.length) {
+                    alert('Please select a file before processing.');
+                    return;
+                }
+            }
+
             processBtn.disabled = true;
             processBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Processing...';
 
-            // 3. Pack up all the text and files from the form
             const formData = new FormData(form);
 
+            // Send only the active input
+            if (mode === 'file') formData.delete('text_input');
+            if (mode === 'text') formData.delete('files[]');
+
             try {
-                // 4. Send the package to your new Python API!
                 const response = await fetch('/api/v1/process', {
                     method: 'POST',
                     body: formData
                 });
-
-                // 5. Read the JSON response from the API
                 const result = await response.json();
 
                 if (response.ok && result.success) {
-                    // SUCCESS! Redirect the user to result.html with the new filename
-                    const outName = result.data.filename;
-                    const count = result.data.file_count;
-                    window.location.href = `/result/${outName}?count=${count}`;
+                    window.location.href = result.data.redirect_url;
                 } else {
-                    // FAILURE! Show the exact error message from your database manager
-                    alert("Processing Failed: " + (result.error || "Unknown error"));
+                    alert('Error: ' + (result.error || 'Internal Server Error'));
                     resetButton();
                 }
-            } catch (error) {
-                // If the server crashes entirely
-                console.error('Error:', error);
-                alert("A network error occurred. Is the server running?");
+            } catch (err) {
+                console.error('Network Error:', err);
+                alert('Server connection failed. Check if app.py is running.');
                 resetButton();
             }
         });
 
-        // Helper function to reset the button if an error occurs
         function resetButton() {
             processBtn.disabled = false;
-            processBtn.innerHTML = '<i class="fas fa-magic me-2"></i>Process & Merge Everything';
+            processBtn.innerHTML = '<i class="fas fa-magic me-2"></i>Process & Generate Document';
         }
     </script>
 </body>
-
 </html>
