@@ -21,7 +21,7 @@ Built by [Codes Technology](https://www.codestechnology.com/)
 ```
 Documentation_api/
 ├── app.py                        # Flask entry point, routes
-├── document_processor.py         # Core pipeline: extract → classify → build → brand
+├── document_processor.py         # Core pipeline: Y-Split Extract → Regex Engine → Brand
 ├── config.py                     # Folder paths, secret key, file size limit
 │
 ├── utils/
@@ -147,23 +147,24 @@ Converts and downloads as `.pdf`. Requires Windows + Microsoft Word installed.
 
 ## Processing Pipeline
 
-```
-Input (HTML or DOCX)
-        ↓
-1. EXTRACT   — raw text blocks with font size, bold, style metadata
-        ↓
-2. CLASSIFY  — assign type: heading1/2/3, bullet, body (Signals A–G)
-        ↓
-3. POST-PROCESS — context inheritance, colon-label promotion, split crammed lines
-        ↓
-4. BUILD     — write classified blocks into a new Document with correct styles
-        ↓
-5. BRAND     — StyleManager applies fonts, sizes, colors, spacing, header/footer
-        ↓
-6. EXTRAS    — CoverPageManager and/or TocManager prepend to final document
-        ↓
-Output (branded .docx)
-```
+The engine abandons brittle, hardcoded English keywords in favor of a **"Y-Split" Architecture** and a **Dynamic Regex Engine**. It relies purely on structural math and pattern recognition to format documents.
+
+### 1. Extraction (Y-Split Architecture)
+* **PDFs (`adobe_helper.py`):** Sent to the **Adobe PDF Services API** to safely extract structural JSON, bypassing manual token handling.
+* **DOCX (Smart XML Extractor):** Uses an `xpath` crawler to bypass Microsoft Word's hidden `<mc:Fallback>` duplicate layers. It pierces through invisible layout tables and text boxes to extract raw text perfectly, without squishing soft line breaks (`<w:br>`).
+
+### 2. The Stitcher
+Automatically detects and heals shattered numbered lists natively found in messy DOCX files (e.g., intercepting a separated `1` and `. Item` and gluing them back together into `1. Item`).
+
+### 3. Classification (Dynamic Regex Engine)
+Every extracted line is passed through math-based rules:
+* **Headings (`H3`):** Any short phrase (≤ 6 words) ending in a colon (e.g., `Deliverables:`, `Tasks:`).
+* **Labels:** Extracts and formats inline labels automatically (e.g., `FR-001: QR Code Scanning`).
+* **Numbered Lists:** Matches regex shapes (`^\d+[\.\)]\s+[A-Z]`), allowing infinite scaling (1 to 10,000) without breaking.
+* **Bullets:** Detects explicit PDF/Word characters (`•`, `-`, `☐`) or implicitly inherits list context from the section label above it.
+
+### 4. Branding
+The `StyleManager` takes the structurally classified document and applies the exact company fonts (Calibri), sizes, colors, and complex multi-level list indents from the master `TEMPLATE.docx`.
 
 ### Classification Signals (A–G)
 
