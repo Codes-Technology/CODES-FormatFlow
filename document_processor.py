@@ -1,37 +1,31 @@
 """
-DocumentProcessor — Signal-Based Classifier + Fresh Build
+DocumentProcessor — Signal-Based Classifier
 
-PIPELINE (file upload path):
-  1. EXTRACT  — read signals from ORIGINAL file XML before anything changes
-  2. CLASSIFY — size ratio + named style + numId + bold (no hardcoded keywords)
-  3. POST-PROCESS — context inheritance + split crammed list items
-  4. BUILD    — fresh doc from template with correct styles
-  5. BRAND    — StyleManager applies color, font, sizes, header/footer
+DOCX PIPELINE (upload):
+  1. EXTRACT  — iter all w:p elements (body + tables + textboxes), skip MC:Fallback
+  2. JOIN     — stitch fragmented numbered items (Word COM splits "1" + ". text")
+  3. CLASSIFY — H1/H2/H3/H4/bullet/body via XML signals (numId, run_size, bold)
+  4. BRAND    — StyleManager applies color, font, sizes, header/footer
 
-PIPELINE (editor/text input path):
-  html_to_docx() — HTML already has structure, skip classify pipeline entirely
+PDF PIPELINE (upload):
+  Adobe Extract API → semantic JSON elements → same brand step
+
+HTML PIPELINE (editor input):
+  html_to_docx() — structure already present, skip classify entirely
 """
 
 import os
 import re
 import traceback
-from statistics import mode, StatisticsError
 from docx import Document
-from pdf2docx import Converter
-from docx.document import Document as _Document
-from docx.table import Table
-from docx.text.paragraph import Paragraph
 from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
-from copy import deepcopy
+from docx.text.paragraph import Paragraph
 from bs4 import BeautifulSoup
 from utils.style_manager import StyleManager
-from config import TEMPLATE_DOCX
+from utils.adobe_helper import adobe_pdf_extract
+from config import TEMPLATE_DOCX, ADOBE_CLIENT_ID, ADOBE_CLIENT_SECRET
 
 W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-
-# Bullet characters that pdf2docx leaves as plain text after PDF conversion
-BULLET_PREFIXES = ('•', '▪', '►', '➤', '→', '○', '●', '‣', '□', '■', '◆', '✓', '✗', '–', '—', '☐', '☑', '☒')
 
 
 class DocumentProcessor:
@@ -39,9 +33,9 @@ class DocumentProcessor:
         self.template_path = template_path
         self.style_manager = StyleManager(template_path)
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # PUBLIC API — called by app.py
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PUBLIC API
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def universal_extract(self, input_path: str, output_path: str) -> dict:
         """Entry point for uploaded files. Routes by extension."""
@@ -51,18 +45,16 @@ class DocumentProcessor:
                 return self._pipeline_pdf(input_path, output_path)
             elif ext == '.docx':
                 return self._pipeline_docx(input_path, output_path)
-            return {'success': False, 'error': f'Unsupported type: {ext}'}
+            return {'success': False, 'error': f'Unsupported file type: {ext}'}
         except Exception as e:
             traceback.print_exc()
             return {'success': False, 'error': str(e)}
 
     def html_to_docx(self, html: str) -> Document:
-        """
-        Rich-text editor HTML → branded DOCX.
-        HTML already encodes structure (h1/h2/ul/p) so we skip the classifier.
-        """
-        doc = Document(self.template_path)
+        """Rich-text editor HTML → branded DOCX. Skips classify pipeline."""
+        doc  = Document(self.template_path)
         soup = BeautifulSoup(html, 'html.parser')
+
         for el in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'table']):
             text = el.get_text().strip()
             if el.name in ('h1', 'h2', 'h3', 'h4'):
@@ -79,408 +71,374 @@ class DocumentProcessor:
                         doc.add_paragraph(li_text, style=style)
             elif el.name == 'table':
                 self._add_html_table(doc, el)
+
         return self.style_manager.apply_template_styles(doc)
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # DOCUMENT ITERATORS
-    # Used by _extract_blocks to walk all paragraphs including tables
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # DOCX PIPELINE
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def iter_block_items(self, parent):
-        """Yield paragraphs and tables in document order."""
-        parent_elm = parent.element.body if isinstance(parent, _Document) else parent._element
-        for child in parent_elm.iterchildren():
-            if child.tag.endswith('}p'):
-                yield Paragraph(child, parent)
-            elif child.tag.endswith('}tbl'):
-                yield Table(child, parent)
+    def _pipeline_docx(self, path: str, out: str) -> dict:
+        source_doc = Document(path)
+        new_doc    = Document(self.template_path)
+        self._h4_counters = {}  # numId → running count for auto-number display
 
-    def iter_all_blocks(self, doc):
-        """Iterate through paragraphs and tables, including inside table cells."""
-        for block in self.iter_block_items(doc):
-            yield block
-            if isinstance(block, Table):
-                for row in block.rows:
-                    for cell in row.cells:
-                        for inner in self.iter_block_items(cell):
-                            yield inner
+        # ── STEP 1: EXTRACT ──────────────────────────────────────────────
+        # iter() walks body + table cells + textboxes in document order.
+        # MC:Fallback must be skipped — Word stores textbox content twice:
+        #   mc:Choice  (real, modern rendering)  ← keep
+        #   mc:Fallback (legacy backup)           ← skip
+        raw_lines = []
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STEP 1 — EXTRACT
-    # Read ALL signals from the ORIGINAL file before anything changes.
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        for p_el in source_doc.element.iter(f'{{{W}}}p'):
 
-    def _extract_blocks(self, docx_path: str) -> list:
-        doc = Document(docx_path)
-
-        # Detect body font size = mode of all explicit run sizes in document.
-        # This becomes the baseline for ratio-based heading detection in Step 2.
-        all_sizes = []
-        for block in self.iter_all_blocks(doc):
-            if isinstance(block, Paragraph):
-                for r in block._p.findall(qn('w:r')):
-                    rPr = r.find(qn('w:rPr'))
-                    if rPr is not None:
-                        sz = rPr.find(qn('w:sz'))
-                        if sz is not None:
-                            try:
-                                all_sizes.append(int(sz.get(qn('w:val'))))
-                            except Exception:
-                                pass
-
-        reasonable_sizes = [s for s in all_sizes if s >= 20]
-        try:
-            body_size = mode(reasonable_sizes) if reasonable_sizes else 22
-        except StatisticsError:
-            body_size = 22
-        print(f'  [Classifier] Body size: {body_size} half-pts = {body_size / 2}pt')
-
-        raw_blocks = []
-
-        for element in doc.element.body:
-            tag = element.tag.split('}')[-1] if '}' in element.tag else element.tag
-
-            # Tables are copied raw — no classification needed
-            if tag == 'tbl':
-                raw_blocks.append({
-                    'type': 'table', 'text': '', 'runs': [],
-                    'level': 0, 'table_element': deepcopy(element)
-                })
-                continue
-            if tag != 'p':
+            # Walk ancestor chain looking for Fallback tag
+            is_fallback = False
+            parent = p_el.getparent()
+            while parent is not None:
+                tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
+                if tag == 'Fallback':
+                    is_fallback = True
+                    break
+                parent = parent.getparent()
+            if is_fallback:
                 continue
 
-            text = ''.join(t.text or '' for t in element.iter(f'{{{W}}}t')).strip()
-            if not text:
-                continue
+            para       = Paragraph(p_el, source_doc)
+            style_name = para.style.name if para.style else 'Normal'
 
-            # ── Paragraph-level signals ──
-            pPr = element.find(qn('w:pPr'))
-            named_style = num_id = None
-            indent_level = 0
+            # Word list-numbering: numId > 0 means this paragraph is part of
+            # an auto-numbered list. The visible number is generated by Word's
+            # engine — it is NOT stored in the text content.
+            pPr      = p_el.find(qn('w:pPr'))
+            numPr    = pPr.find(qn('w:numPr'))   if pPr   is not None else None
+            numId_el = numPr.find(qn('w:numId')) if numPr is not None else None
+            ilvl_el  = numPr.find(qn('w:ilvl'))  if numPr is not None else None
+            num_id   = int(numId_el.get(qn('w:val'), 0)) if numId_el is not None else 0
+            num_lvl  = int(ilvl_el.get(qn('w:val'),  0)) if ilvl_el  is not None else 0
 
-            if pPr is not None:
-                pStyle = pPr.find(qn('w:pStyle'))
-                if pStyle is not None:
-                    named_style = pStyle.get(qn('w:val'), '')
-                numPr = pPr.find(qn('w:numPr'))
-                if numPr is not None:
-                    n  = numPr.find(qn('w:numId'))
-                    il = numPr.find(qn('w:ilvl'))
-                    try: num_id = int(n.get(qn('w:val'))) if n is not None else None
-                    except Exception: pass
-                    try: indent_level = int(il.get(qn('w:val'))) if il is not None else 0
-                    except Exception: pass
-
-            # ── Run-level signals (size + bold for classifier) ──
+            # Run-level signals: bold and explicit font size
             run_sizes, is_bold = [], False
-            for r in element.findall(qn('w:r')):
+            for r in p_el.findall(qn('w:r')):
                 rPr = r.find(qn('w:rPr'))
                 if rPr is not None:
                     sz = rPr.find(qn('w:sz'))
                     if sz is not None:
                         try: run_sizes.append(int(sz.get(qn('w:val'))))
-                        except Exception: pass
+                        except: pass
                     if rPr.find(qn('w:b')) is not None:
                         is_bold = True
+            run_size = max(run_sizes) if run_sizes else 0
 
-            run_size = max(run_sizes) if run_sizes else None
+            text_full = para.text.strip()
+            if not text_full:
+                continue
 
-            # ── Inline runs (bold/italic preserved into output) ──
-            runs = []
-            for r in element.findall(qn('w:r')):
-                rt = ''.join(t.text or '' for t in r.findall(qn('w:t')))
-                if not rt:
+            # Soft line-breaks (\v / \n) inside one paragraph → split into separate lines
+            lines = text_full.split('\n') if '\n' in text_full else [text_full]
+            for line in lines:
+                line = line.strip()
+                if line:
+                    raw_lines.append({
+                        'text':    line,
+                        'style':   style_name,
+                        'is_bold': is_bold,
+                        'run_size': run_size,
+                        'num_id':  num_id,
+                        'num_lvl': num_lvl,
+                    })
+
+        # ── STEP 2: JOIN ─────────────────────────────────────────────────
+        # Word COM PDF→DOCX conversion fragments numbered items across paragraphs:
+        #   ["1"]  [". Customer opens..."]          → "1. Customer opens..."
+        #   ["3"]  [")"]  [". System validates..."] → "3. System validates..."
+        #   ["6"]  (nothing joinable)               → emit as "6." placeholder
+        # Also converts lone "-" paragraph markers into dash-bullet prefix.
+        joined = []
+        i = 0
+        while i < len(raw_lines):
+            item = raw_lines[i]
+            t    = item['text'].strip()
+
+            # Lone digit — attempt forward stitch
+            if re.match(r'^\d+$', t) and i + 1 < len(raw_lines):
+                next_t = raw_lines[i + 1]['text'].strip()
+
+                if re.match(r'^[\.\)]\s+\S', next_t):
+                    # "1" + ". Customer opens..." → "1. Customer opens..."
+                    # Normalize both "." and ")" separators to ". "
+                    normalized = re.sub(r'^[\.\)]\s*', '. ', next_t)
+                    item = dict(item)
+                    item['text'] = t + normalized
+                    joined.append(item)
+                    i += 2
                     continue
-                rPr = r.find(qn('w:rPr'))
-                bold = italic = False
-                if rPr is not None:
-                    bold   = rPr.find(qn('w:b')) is not None
-                    italic = rPr.find(qn('w:i')) is not None
-                runs.append({'text': rt, 'bold': bold, 'italic': italic})
-            
-            #--bullet prefix-stripping
-            stripped_text = text
-            is_pdf_bullet = False
-            if text.startswith(BULLET_PREFIXES):
-                stripped_text = text[1:].lstrip()
-                is_pdf_bullet = True
-            elif re.match(r'^[-\*]\s+\S', text):
-                stripped_text = text[1:].lstrip()
-                is_pdf_bullet = True
 
-            if is_pdf_bullet:
-                # Also strip the prefix from runs
-                clean_runs = []
-                prefix_remaining = len(text) - len(stripped_text)
-                consumed = 0
-                for rd in runs:
-                    if consumed < prefix_remaining:
-                        skip = min(prefix_remaining - consumed, len(rd['text']))
-                        remaining = rd['text'][skip:].lstrip() if consumed + skip >= prefix_remaining else rd['text'][skip:]
-                        consumed += skip
-                        if remaining:
-                            clean_runs.append({'text': remaining, 'bold': rd['bold'], 'italic': rd['italic']})
+                elif next_t in ('.', ')') and i + 2 < len(raw_lines):
+                    # "3" + ")" + ". System validates..." → "3. System validates..."
+                    rest       = raw_lines[i + 2]['text'].strip()
+                    rest_clean = re.sub(r'^[\.\)]\s*', '', rest)
+                    item = dict(item)
+                    item['text'] = t + '. ' + rest_clean
+                    joined.append(item)
+                    i += 3
+                    continue
+
+                elif re.match(r'^\d+$', next_t):
+                    # Two consecutive lone digits — skip this one
+                    i += 1
+                    continue
+
+                else:
+                    # Lone digit with no joinable continuation — keep as placeholder
+                    item = dict(item)
+                    item['text'] = t + '.'
+                    joined.append(item)
+                    i += 1
+                    continue
+
+            # Lone punctuation — append to previous only if it isn't already a complete numbered item
+            elif joined and len(t) == 1 and t in '.)':
+                if not re.match(r'^\d+[\.\)]', joined[-1]['text']):
+                    joined[-1]['text'] += t
+                i += 1
+                continue
+
+            # Fragment like ". Customer scans QR on table"
+            elif joined and re.match(r'^[\.\)]\s+\S', t):
+                prev = joined[-1]['text']
+                if not re.match(r'^\d+[\.\)]\s+\S', prev):
+                    # Previous is not yet a complete numbered item — stitch
+                    joined[-1]['text'] += t
+                    i += 1
+                    continue
+                else:
+                    # Previous is already a complete numbered item — this is a
+                    # continuation bullet from the same step; strip leading dot
+                    item = dict(item)
+                    item['text'] = re.sub(r'^[\.\)]\s*', '', t).strip()
+                    if item['text']:
+                        joined.append(item)
+                    i += 1
+                    continue
+
+            # Lone "-" paragraph — prefix the NEXT line as a dash bullet
+            elif t == '-':
+                if i + 1 < len(raw_lines):
+                    raw_lines[i + 1]['text'] = '- ' + raw_lines[i + 1]['text'].lstrip('- ')
+                i += 1
+                continue
+
+            if t:
+                joined.append(item)
+            i += 1
+
+        raw_lines = joined
+
+        # ── STEP 3: CLASSIFY + BUILD ──────────────────────────────────────
+        # All signals are purely structural — no hardcoded keywords.
+        # This means the classifier adapts to any document regardless of domain.
+        #
+        # Signal reliability per document type:
+        #   Native DOCX:     style names reliable, run_size reliable, bold reliable
+        #   Word COM output: only 'Heading 1' style preserved; bold/size stripped
+        #                    → rely on numId, structural patterns, run_size fallback
+        #
+        # expecting_list tracks whether we're inside a label-introduced section
+        # (e.g. "Tasks:" → following lines are bullets until next heading)
+        expecting_list = False
+
+        for item in raw_lines:
+            text     = item['text'].replace('Ł', '').strip()
+            style    = item['style']
+            is_bold  = item['is_bold']
+            run_size = item['run_size']
+            num_id   = item['num_id']
+            num_lvl  = item['num_lvl']
+            is_numbered_list_item = num_id > 0
+
+            if not text:
+                continue
+
+            # Structural pattern signals — zero keywords, work for any language/domain
+            is_section_label    = text.endswith(':') and len(text.split()) <= 6
+            is_numbered_heading = bool(re.match(r'^\d+[\.\)]\s+[A-Z]', text))
+            is_explicit_bullet  = text.startswith(('☐', '☑', '•', '▪', '►', '■', '□'))
+            is_dash_bullet      = bool(re.match(r'^[-–]\s+\S', text))
+
+            # Update list context state
+            if text.endswith('.') and len(text) > 80:
+                expecting_list = False
+            if is_section_label:
+                expecting_list = True
+
+            # ── H1 ───────────────────────────────────────────────────────
+            # Word COM reliably preserves Heading 1 style name only
+            if 'Heading 1' in style:
+                new_doc.add_heading(text, level=1)
+                expecting_list = False
+
+            # ── H2 ───────────────────────────────────────────────────────
+            # Signals: named style, large run size (≥26 half-pts = 13pt+),
+            # bold+size combo, or structural "TitleWord Number:" pattern.
+            # ⚠ The regex only catches "Word 1:" style — all-caps ("PHASE 2:")
+            # or underscored ("Sprint_1:") won't match. Add patterns if needed.
+            elif (
+                'Heading 2' in style
+                or run_size >= 26
+                or (is_bold and run_size >= 22 and len(text.split()) <= 10)
+                or (is_bold and not is_section_label and len(text.split()) <= 8
+                    and not text.endswith('.'))
+                or re.match(r'^[A-Z][a-z]+\s+[\d][\d\-\+\.]*\s*:', text)
+            ):
+                new_doc.add_heading(text, level=2)
+                expecting_list = False
+
+            # ── H3 ───────────────────────────────────────────────────────
+            # Section labels ("Tasks:", "Deliverables:") and short bold lines
+            elif (
+                'Heading 3' in style
+                or is_section_label
+                or (is_bold and len(text.split()) <= 6)
+            ):
+                new_doc.add_heading(text, level=3)
+                expecting_list = True if is_section_label else False
+
+            # ── H4 ───────────────────────────────────────────────────────
+            # numId signal = Word auto-numbered list item ("1. Kickoff Meeting")
+            # Short numbered heading = text already contains number ("2. UI/UX")
+            # Guard: long text (>6 words) stays as a bullet — it's a step, not a title
+            elif (
+                (is_numbered_list_item and num_lvl == 0)
+                or (is_numbered_heading and len(text.split()) <= 6)
+            ):
+                if is_numbered_list_item:
+                    # Number is NOT in the text — Word generates it via numId.
+                    # We reconstruct it manually so it appears in the output.
+                    self._h4_counters[num_id] = self._h4_counters.get(num_id, 0) + 1
+                    display_text = f"{self._h4_counters[num_id]}. {text}"
+                else:
+                    # Number already present in text (e.g. "2. UI/UX Requirements")
+                    display_text = text
+                new_doc.add_heading(display_text, level=4)
+                expecting_list = True
+
+            # ── BULLETS ──────────────────────────────────────────────────
+            elif is_explicit_bullet or is_dash_bullet or expecting_list:
+                clean = re.sub(r'^[-–☐☑•▪►■□]\s*', '', text).strip().rstrip('-').strip()
+                if not clean:
+                    continue
+
+                # Code-style label heading: "FR-001: title" or "UC-01: description"
+                # Detect by digit/hyphen in label — avoids promoting generic fields
+                # like "Description:" or "User Role:" which have no digit/hyphen
+                colon_pos = clean.find(':')
+                label     = clean[:colon_pos] if colon_pos > 0 else ''
+                is_label_heading = (
+                    colon_pos > 0
+                    and len(label.split()) <= 2
+                    and not clean.endswith(':')
+                    and len(clean) > colon_pos + 2
+                    and not expecting_list
+                    and re.search(r'[\d\-]', label)
+                )
+
+                if is_label_heading:
+                    new_doc.add_heading(clean, level=3)
+                else:
+                    # Split crammed items — only when clearly 3+ distinct items (2+ words each)
+                    # e.g. "Stakeholder map Interview schedule Project doc" → 3 bullets
+                    items = re.split(r'(?<=[a-z\)\d])\s+(?=[A-Z][a-z])', clean)
+                    items = [it.strip() for it in items if it.strip()]
+                    if len(items) >= 3 and all(len(it.split()) >= 2 for it in items):
+                        for it in items:
+                            it_clean = re.sub(r'^[-☐•▪]\s*', '', it).strip()
+                            if it_clean:
+                                try:    p = new_doc.add_paragraph(style='List Bullet')
+                                except: p = new_doc.add_paragraph()
+                                p.add_run(it_clean)
                     else:
-                        clean_runs.append(rd)
-                btype = 'bullet'
-                raw_blocks.append({'type': btype, 'text': stripped_text, 'runs': clean_runs, 'level': indent_level})
+                        try:    p = new_doc.add_paragraph(style='List Bullet')
+                        except: p = new_doc.add_paragraph()
+                        p.add_run(clean)
+
+            # ── BODY ─────────────────────────────────────────────────────
             else:
-                btype = self._classify(named_style, num_id, run_size, body_size, is_bold, text)
-                raw_blocks.append({'type': btype, 'text': text, 'runs': runs, 'level': indent_level})
+                new_doc.add_paragraph(text)
 
-        return self._post_process(raw_blocks)
+        # ── STEP 4: BRAND ────────────────────────────────────────────────
+        branded_doc = self.style_manager.apply_template_styles(new_doc)
+        branded_doc.save(out)
+        return {'success': True, 'paragraphs': len(new_doc.paragraphs)}
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STEP 2 — CLASSIFY
-    # Signal priority A→G. No hardcoded domain keywords.
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # PDF PIPELINE
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def _classify(self, named_style, num_id, run_size, body_size, is_bold, text) -> str:
-        # A — Named Word style (most reliable — trust the original author's intent)
-        if named_style:
-            ns = named_style.lower().replace(' ', '')
-            if   'heading1' in ns: return 'heading1'
-            elif 'heading2' in ns: return 'heading2'
-            elif 'heading3' in ns: return 'heading3'
-            elif 'heading4' in ns: return 'heading4'
-            elif 'title'    in ns: return 'title'
-            elif 'listparagraph' in ns or 'listbullet' in ns:
-                # "Deliverables:" styled as list but it's actually a section label
-                if text.rstrip().endswith(':') and len(text.split()) <= 8:
-                    return 'heading3'
-                return 'bullet'
-            elif 'listnumber' in ns:
-                return 'numbered'
+    def _pipeline_pdf(self, path: str, out: str) -> dict:
+        """Adobe Extract API → semantic JSON elements → branded DOCX."""
+        try:
+            elements    = adobe_pdf_extract(path, ADOBE_CLIENT_ID, ADOBE_CLIENT_SECRET)
+            doc         = self._build_from_adobe_json(elements)
+            branded_doc = self.style_manager.apply_template_styles(doc)
+            branded_doc.save(out)
+            return {'success': True}
+        except Exception as e:
+            print(f'[DocumentProcessor] Adobe API error: {e}')
+            return {'success': False, 'error': str(e)}
 
-        # B — Explicit list marker in XML
-        if num_id is not None and num_id > 0:
-            return 'bullet'
+    def _build_from_adobe_json(self, elements: list) -> Document:
+        """Convert Adobe Extract API semantic elements into a structured DOCX."""
+        doc            = Document(self.template_path)
+        expecting_list = False
 
-        # C — Font size ratio (core classifier — works for ANY document)
-        # Uses ratio not absolute size so it adapts to any base font
-        if run_size is not None and body_size > 0:
-            ratio = run_size / body_size
-            if   ratio >= 1.5:  return 'title'
-            elif ratio >= 1.15: return 'heading2'
-            elif ratio >= 1.05: return 'heading3'
+        for el in elements:
+            path = el.get('Path', '')
+            text = el.get('Text', '').strip()
 
-        # D — Bold short line with no sentence-ending period
-        if is_bold and len(text.split()) <= 12 and not text.endswith('.'):
-            return 'heading3'
-
-        # E — ALL CAPS short line
-        if text.isupper() and 2 < len(text) and len(text.split()) <= 15:
-            return 'heading2'
-
-        # F — Line ending with ':' (section label) or starting with digit (numbered section)
-        stripped = text.rstrip()
-        if stripped.endswith(':') and len(stripped.split()) <= 8:
-            return 'heading3'
-        if re.match(r'^\d+[\.\)]\s+\w', text) and len(text.split()) <= 6:
-            return 'heading3'
-
-        # G — "Word N: description" e.g. "Week 1:", "Module 3:", "Unit 7.2:"
-        # Structural pattern — no hardcoded words, matches any TitleCase + digit + colon
-        if re.match(r'^[A-Z][a-z]+\s+[\d][\d\-\.]*\s*:', text) and len(text.split()) <= 12:
-            return 'heading2'
-
-        return 'body'
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STEP 3 — POST-PROCESS
-    # Fix misclassifications using context between adjacent blocks.
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _post_process(self, raw_blocks: list) -> list:
-        blocks = []
-        last_h3_colon   = False   # True when previous block was heading3 ending ':'
-        last_was_bullet = False
-
-        for block in raw_blocks:
-            btype = block['type']
-            text  = block['text']
-
-            if btype == 'table':
-                blocks.append(block)
-                last_h3_colon = last_was_bullet = False
+            if not text and 'Table' not in path:
                 continue
 
-            # ── "Cloud kitchen Observe workflows:" ──
-            # heading3 crammed with a trailing bullet item before the label.
-            # Split into: bullet("Cloud kitchen") + heading3("Observe workflows:")
-            if btype == 'heading3' and last_was_bullet:
-                parts = self._try_split_crammed(text)
-                if len(parts) >= 2 and parts[-1].rstrip().endswith(':'):
-                    for part in parts[:-1]:
-                        nb = dict(block)
-                        nb['type'] = 'bullet'
-                        nb['text'] = part
-                        nb['runs'] = [{'text': part, 'bold': False, 'italic': False}]
-                        blocks.append(nb)
-                    nb = dict(block)
-                    nb['text'] = parts[-1]
-                    nb['runs'] = [{'text': parts[-1], 'bold': True, 'italic': False}]
-                    blocks.append(nb)
-                    last_h3_colon   = True
-                    last_was_bullet = False
-                    continue
-
-            # ── Body paragraph after heading3+':' or after bullets → promote to bullet ──
-            if btype == 'body' and (last_h3_colon or last_was_bullet):
-
-                # Try crammed split first (e.g. "Item1 Item2 Item3" → 3 bullets)
-                split_items = self._try_split_crammed(text) if last_h3_colon else []
-                if not split_items and self._looks_like_list_item(text):
-                    split_items = self._try_split_crammed(text)
-
-                if split_items and len(split_items) > 1:
-                    for item in split_items:
-                        new_block = dict(block)
-                        new_block['type'] = 'bullet'
-                        new_block['text'] = item
-                        new_block['runs'] = [{'text': item, 'bold': False, 'italic': False}]
-                        blocks.append(new_block)
-                    last_was_bullet = True
-                    last_h3_colon   = False
-                    continue
-
-                # Continue bullet list if line looks like a list item
-                if last_was_bullet:
-                    clean = text.strip()
-                    if clean and not clean.endswith('.') and not clean.endswith(':') and clean[0].isupper():
-                        block['type'] = 'bullet'
-
-            btype = block['type']   # may have changed above
-            blocks.append(block)
-
-            # Update context flags for next iteration
-            if btype in ('heading1', 'heading2', 'heading3', 'title'):
-                last_h3_colon   = (btype == 'heading3' and text.rstrip().endswith(':'))
-                last_was_bullet = False
-            elif btype in ('bullet', 'numbered'):
-                last_h3_colon   = False
-                last_was_bullet = True
-            else:
-                last_h3_colon   = False
-                last_was_bullet = False
-
-        return blocks
-
-    def _looks_like_list_item(self, text: str) -> bool:
-        """Short line without sentence structure → probably a list item."""
-        if len(text) > 400:
-            return False
-        if re.search(r'\.\s+[A-Z]', text):   # multiple sentences → body paragraph
-            return False
-        if not text.endswith('.'):
-            return False
-        return False
-
-    def _try_split_crammed(self, text: str) -> list:
-      
-        parts = re.split(r'(?<=[a-z\)\d])\s+(?=[A-Z][a-z])', text)
-        if len(parts) >= 2 and all(len(p.strip()) > 2 for p in parts):
-            return [p.strip() for p in parts if p.strip()]
-        return []
-
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # STEP 4 — BUILD
-    # Write classified blocks into a fresh doc opened from template.
-    # Template gives us header/footer/page layout for free.
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _build_fresh_doc(self, blocks: list) -> Document:
-        doc = Document(self.template_path)
-
-        for block in blocks:
-            btype = block['type']
-            text  = block['text']
-            runs  = block['runs']
-
-            if btype == 'table':
-                doc.element.body.append(block['table_element'])
-                doc.element.body.append(OxmlElement('w:p'))   # empty separator after table
+            # Adobe separates bullet labels ("/Lbl") from content ("/LBody").
+            # Skip labels — LBody carries the full text we need.
+            if '/Lbl' in path:
                 continue
 
-            if btype in ('title', 'heading1'):
-                p = doc.add_heading(text, level=1)
-            elif btype == 'heading2':
-                p = doc.add_heading(text, level=2)
-            elif btype == 'heading3':
-                p = doc.add_heading(text, level=3)
-            elif btype in ('bullet', 'numbered'):
-                style = 'List Bullet' if btype == 'bullet' else 'List Number'
-                try:
-                    p = doc.add_paragraph(style=style)
-                except Exception:
-                    p = doc.add_paragraph()
-                self._write_runs(p, runs, text, force_no_bold=True)
+            text = text.replace('Ł', '').strip()
+
+            is_section_label = text.endswith(':') and len(text.split()) <= 6
+            is_explicit_bullet = text.startswith(('-', '☐', '•', '▪', '➤', '■'))
+
+            # Update list context
+            if is_section_label:
+                expecting_list = True
+            elif text.endswith('.') or len(text) > 120 or re.search(r'/H\d', path):
+                expecting_list = False
+
+            if '/Title' in path:
+                doc.add_heading(text, level=1)
+            elif re.search(r'/H1', path):
+                doc.add_heading(text, level=1)
+            elif re.search(r'/H2', path):
+                doc.add_heading(text, level=2)
+            elif re.search(r'/H3', path) or is_section_label:
+                doc.add_heading(text, level=3)
+            elif '/LI' in path or '/LBody' in path or is_explicit_bullet or expecting_list:
+                clean = re.sub(r'^[-\[\]☐•▪➤■]\s*', '', text)
+                doc.add_paragraph(clean, style='List Bullet')
+            elif 'Table' in path:
+                pass  # table reconstruction not yet implemented
             else:
-                p = doc.add_paragraph()
-                self._write_runs(p, runs, text, force_no_bold=True)
+                doc.add_paragraph(text)
 
         return doc
 
-    def _write_runs(self, para, runs: list, fallback_text: str, force_no_bold: bool = False):
-        """Write runs preserving bold/italic. Do NOT strip text."""
-
-        if runs:
-            for rd in runs:
-                text = rd['text']
-
-                if text and text.strip():
-                    r = para.add_run(text)
-                    r.bold   = False if force_no_bold else rd.get('bold', False)
-                    r.italic = False if force_no_bold else rd.get('italic', False)
-        else:
-            para.add_run(fallback_text)
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # PIPELINES
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _pipeline_docx(self, path: str, out: str) -> dict:
-        print(f'  [DocProcessor] {os.path.basename(path)}')
-
-        blocks = self._extract_blocks(path)              # Steps 1 + 2 + 3
-
-        h  = sum(1 for b in blocks if b['type'].startswith('heading'))
-        bl = sum(1 for b in blocks if b['type'] == 'bullet')
-        t  = sum(1 for b in blocks if b['type'] == 'table')
-        print(f'  [Classifier] {len(blocks)} blocks → {h} headings, {bl} bullets, {t} tables')
-
-        fresh   = self._build_fresh_doc(blocks)                     # Step 4
-        branded = self.style_manager.apply_template_styles(fresh)   # Step 5
-        branded.save(out)
-
-        return {'success': True, 'paragraphs': len(branded.paragraphs),
-                'tables': t, 'tables_found': t}
-
-    def _pipeline_pdf(self, path: str, out: str) -> dict:
-        """PDF → pdf2docx → your perfect classifier pipeline"""
-        temp = out.replace('.docx', '_raw.docx')
-        
-        print(f'  [DocProcessor] PDF → temp DOCX via pdf2docx: {os.path.basename(temp)}')
-        
-        try:
-            
-            cv = Converter(path)
-            cv.convert(temp, multi_processing=True, OCR_language="eng")
-            cv.close()
-        except Exception as e:
-            return {'success': False, 'error': f'pdf2docx failed: {e}'}
-        
-        # Your classifier magic happens here
-        return self._pipeline_docx(temp, out)
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # HTML TABLE HELPER
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _add_html_table(self, doc: Document, element):
-        """Converts a BeautifulSoup <table> element into a Word table."""
+        """Convert a BeautifulSoup <table> element into a Word table."""
         rows = element.find_all('tr')
         if not rows:
             return
@@ -488,8 +446,8 @@ class DocumentProcessor:
         if not cols:
             return
         table = doc.add_table(rows=len(rows), cols=cols)
-        try: table.style = 'Table Grid'
-        except Exception: pass
+        try:    table.style = 'Table Grid'
+        except: pass
         for i, row in enumerate(rows):
             for j, cell in enumerate(row.find_all(['td', 'th'])):
                 if j < cols:

@@ -1,11 +1,9 @@
 """
 StyleManager 
-
 """
 
 from docx import Document
 from docx.oxml.ns import qn
-from docx.shared import Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from copy import deepcopy
@@ -14,6 +12,7 @@ from copy import deepcopy
 H1_SIZE   = 32   # 16pt
 H2_SIZE   = 28   # 14pt
 H3_SIZE   = 26   # 13pt
+H4_SIZE   = 24   # 12pt
 BODY_SIZE = 22   # 11pt
 MIN_SIZE  = 22   # 11pt minimum
 
@@ -37,6 +36,7 @@ class StyleManager:
         self._fix_list_indentation(doc)
         self._brand_body_paragraphs(doc)
         self._apply_page_layout_rules(doc)
+        self._apply_heading_indents(doc)
         self._copy_header_footer(doc)
         self._add_page_number(doc)
        
@@ -63,6 +63,9 @@ class StyleManager:
             'Heading1Char': {'sz': H1_SIZE,   'bold': True},
             'Heading2Char': {'sz': H2_SIZE,   'bold': True},
             'Heading3Char': {'sz': H3_SIZE,   'bold': True},
+            'Heading4':     {'sz': 24,         'bold': True},
+            'Heading 4':    {'sz': 24,         'bold': True},
+            'Heading4Char': {'sz': 24,         'bold': True},
         }
 
         styles_elem = doc.part.styles._element
@@ -125,27 +128,71 @@ class StyleManager:
                 for e in pPr.findall(qn('w:keepNext')):
                     pPr.remove(e)
                 pPr.append(OxmlElement('w:keepNext'))
-    
-    def _fix_list_indentation(self, doc):
 
-        bullet_styles = [
-            "List Bullet",
-            "List Bullet 2",
-            "List Bullet 3"
-        ]
-
-        for style_name in bullet_styles:
-
-            try:
-                style = doc.styles[style_name]
-                pformat = style.paragraph_format
-
-                # Reduce spacing between bullet and text
-                pformat.left_indent = Inches(0.25)
-                pformat.first_line_indent = Inches(-0.15)
-
-            except KeyError:
+    def _apply_heading_indents(self, doc: Document):
+        """Indent headings progressively right by level."""
+        INDENT = {
+            'Heading 1': 0,   'Heading1': 0,
+            'Heading 2': 240, 'Heading2': 240,   # ~0.17 inch
+            'Heading 3': 480, 'Heading3': 480,   # ~0.33 inch
+            'Heading 4': 720, 'Heading4': 720,   # ~0.50 inch
+        }
+        for para in doc.paragraphs:
+            sname = para.style.name if para.style else ''
+            twips = INDENT.get(sname)
+            if twips is None:
                 continue
+            pPr = para._p.find(qn('w:pPr'))
+            if pPr is None:
+                pPr = OxmlElement('w:pPr')
+                para._p.insert(0, pPr)
+            for e in pPr.findall(qn('w:ind')):
+                pPr.remove(e)
+            if twips > 0:
+                ind = OxmlElement('w:ind')
+                ind.set(qn('w:left'), str(twips))
+                pPr.append(ind)
+    
+    def _fix_list_indentation(self, doc: Document):
+        """Bullets under H4 indent further than bullets under H3."""
+
+        # Base indent for all bullets
+        BASE_LEFT    = 720   # twips (~0.5 inch)
+        BASE_HANGING = 240   # twips (~0.17 inch)
+        
+        # Extra indent when bullet follows H4
+        H4_LEFT      = 960   # twips (~0.67 inch)
+
+        last_heading_level = 0
+
+        for para in doc.paragraphs:
+            sname = para.style.name if para.style else ''
+
+            # Track heading level
+            if sname in ('Heading 1', 'Heading1'):
+                last_heading_level = 1
+            elif sname in ('Heading 2', 'Heading2'):
+                last_heading_level = 2
+            elif sname in ('Heading 3', 'Heading3'):
+                last_heading_level = 3
+            elif sname in ('Heading 4', 'Heading4'):
+                last_heading_level = 4
+
+            elif 'List' in sname:
+                left = H4_LEFT if last_heading_level == 4 else BASE_LEFT
+
+                pPr = para._p.find(qn('w:pPr'))
+                if pPr is None:
+                    pPr = OxmlElement('w:pPr')
+                    para._p.insert(0, pPr)
+
+                for e in pPr.findall(qn('w:ind')):
+                    pPr.remove(e)
+
+                ind = OxmlElement('w:ind')
+                ind.set(qn('w:left'),    str(left))
+                ind.set(qn('w:hanging'), str(BASE_HANGING))
+                pPr.append(ind)
 
     def _copy_header_footer(self, doc: Document):
         template_section = self.template.sections[0]

@@ -1,4 +1,11 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv() # Loads the variables from the .env file
+
+# Adobe API Credentials
+ADOBE_CLIENT_ID = os.getenv('ADOBE_CLIENT_ID')
+ADOBE_CLIENT_SECRET = os.getenv('ADOBE_CLIENT_SECRET')
 
 # Base directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

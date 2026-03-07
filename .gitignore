@@ -1,8 +1,13 @@
+# Environments
+.env
 venv/
+env/
+
+# Python caches
 __pycache__/
 *.pyc
-output/
-uploads/
-*.docx
-~$*
-.env
+*.pyo
+
+# Extracted temp files
+*.zip
+*.log
