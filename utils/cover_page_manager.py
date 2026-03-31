@@ -1,10 +1,6 @@
 """
 CoverPageManager — Injects a cover page at the start of the document.
 
-INJECTION STRATEGY:
-  Elements are inserted at index 0 in reverse order (stack behaviour).
-  Insert bottom-most element first so the final page order is:
-    Title → Subtitle → Executive Summary → Date → Section break → Content
 """
 
 import ollama

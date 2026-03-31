@@ -1,37 +1,35 @@
 """
 DocumentProcessor — Signal-Based Classifier
 
-DOCX PIPELINE (upload):
-  1. EXTRACT  — iter all w:p elements (body + tables + textboxes), skip MC:Fallback
-  2. JOIN     — stitch fragmented numbered items (Word COM splits "1" + ". text")
-  3. CLASSIFY — H1/H2/H3/H4/bullet/body via XML signals (numId, run_size, bold)
-  4. BRAND    — StyleManager applies color, font, sizes, header/footer
-
-PDF PIPELINE (upload):
-  Adobe Extract API → semantic JSON elements → same brand step
-
-HTML PIPELINE (editor input):
-  html_to_docx() — structure already present, skip classify entirely
 """
 
 import os
 import re
+import time
 import traceback
+import tempfile
 from docx import Document
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
 from bs4 import BeautifulSoup
 from utils.style_manager import StyleManager
 from utils.adobe_helper import adobe_pdf_extract
+from utils.toc_manager import TocManager
+from utils.cover_page_manager import CoverPageManager
 from config import TEMPLATE_DOCX, ADOBE_CLIENT_ID, ADOBE_CLIENT_SECRET
 
 W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
 
 class DocumentProcessor:
-    def __init__(self, template_path: str = TEMPLATE_DOCX):
+    def __init__(self, template_path: str, font_family: str = 'Calibri', font_size: int = 11, 
+                 include_cover: bool = False, include_toc: bool = False):
         self.template_path = template_path
-        self.style_manager = StyleManager(template_path)
+        self.style_manager = StyleManager(template_path, font_family, font_size)
+        self.include_cover = include_cover
+        self.include_toc = include_toc
+        self.toc_manager = TocManager()
+        self.cover_manager = CoverPageManager()
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # PUBLIC API
@@ -51,43 +49,122 @@ class DocumentProcessor:
             return {'success': False, 'error': str(e)}
 
     def html_to_docx(self, html: str) -> Document:
-        """Rich-text editor HTML → branded DOCX. Skips classify pipeline."""
-        doc  = Document(self.template_path)
+        doc = Document(self.template_path)
         soup = BeautifulSoup(html, 'html.parser')
 
-        for el in soup.find_all(['h1', 'h2', 'h3', 'h4', 'p', 'ul', 'ol', 'table']):
-            text = el.get_text().strip()
-            if el.name in ('h1', 'h2', 'h3', 'h4'):
-                if text:
-                    doc.add_heading(text, level=int(el.name[1]))
-            elif el.name == 'p':
-                if text:
-                    doc.add_paragraph(text)
-            elif el.name in ('ul', 'ol'):
-                style = 'List Bullet' if el.name == 'ul' else 'List Number'
-                for li in el.find_all('li', recursive=False):
-                    li_text = li.get_text().strip()
-                    if li_text:
-                        doc.add_paragraph(li_text, style=style)
-            elif el.name == 'table':
-                self._add_html_table(doc, el)
+        print(f"[DocumentProcessor] Incoming HTML Length: {len(html)}")
 
-        return self.style_manager.apply_template_styles(doc)
+        processed_elements = set()
 
+        # ── FIX: pass doc explicitly into process_node ──
+        def process_node(node, container):
+            """
+            Recursive HTML walker that preserves formatting.
+            container: Can be a Document or a Paragraph object.
+            """
+            if node in processed_elements:
+                return
+
+            if not getattr(node, 'name', None):
+                # Text node
+                clean_text = str(node).strip()
+                if clean_text:
+                    if isinstance(container, Paragraph):
+                        container.add_run(clean_text)
+                    else:
+                        container.add_paragraph(clean_text)
+                return
+
+            # --- Block Elements ---
+            if node.name in ('h1', 'h2', 'h3', 'h4'):
+                level = int(node.name[1])
+                para = container.add_heading('', level=level)
+                for child in node.contents:
+                    process_node(child, para) # Pass the paragraph to continue run building
+                processed_elements.add(node)
+
+            elif node.name == 'p':
+                para = container.add_paragraph()
+                for child in node.contents:
+                    process_node(child, para)
+                processed_elements.add(node)
+
+            elif node.name == 'table':
+                self._add_html_table(container, node)
+                processed_elements.add(node)
+                # Tables handle their own children in _add_html_table
+
+            elif node.name in ('ul', 'ol'):
+                style = 'List Bullet' if node.name == 'ul' else 'List Number'
+                for li in node.find_all('li', recursive=False):
+                    para = container.add_paragraph(style=style)
+                    for child in li.contents:
+                        process_node(child, para)
+                processed_elements.add(node)
+
+            # --- Inline/Formatting Elements ---
+            elif node.name in ('b', 'strong', 'i', 'em', 'u', 'span'):
+                if isinstance(container, Paragraph):
+                    # We are already inside a paragraph, add a run and recurse
+                    run = container.add_run()
+                    if node.name in ('b', 'strong'): run.bold = True
+                    if node.name in ('i', 'em'): run.italic = True
+                    if node.name == 'u': run.underline = True
+                    
+                    # Process children into THIS run if they are simple text, 
+                    # else recurse to handle nested formatting like <b><i>...</i></b>
+                    for child in node.contents:
+                        if not getattr(child, 'name', None):
+                            run.text += str(child)
+                        else:
+                            process_node(child, container) 
+                else:
+                    # Formatting tag outside a paragraph — create a new paragraph
+                    para = container.add_paragraph()
+                    process_node(node, para)
+                processed_elements.add(node)
+
+            elif node.name == 'div':
+                block_children = node.find(['p', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'table', 'div'])
+                if not block_children:
+                    para = container.add_paragraph()
+                    for child in node.contents:
+                        process_node(child, para)
+                    processed_elements.add(node)
+                else:
+                    for child in node.contents:
+                        process_node(child, container)
+            else:
+                # Unknown tag — just recurse
+                for child in node.contents:
+                    process_node(child, container)
+
+        # ── Start recursion ──
+        for child in soup.contents:
+            process_node(child, doc)
+
+        styled_doc = self.style_manager.apply_template_styles(doc)
+        self._apply_final_features(styled_doc)
+        return styled_doc
+
+    def _apply_final_features(self, doc: Document):
+        """Adds Cover Page and Table of Contents if requested."""
+        if self.include_cover:
+            self.cover_manager.create_cover_page(doc)
+
+        if self.include_toc:
+            self.toc_manager.insert_toc(doc)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # DOCX PIPELINE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _pipeline_docx(self, path: str, out: str) -> dict:
         source_doc = Document(path)
-        new_doc    = Document(self.template_path)
-        self._h4_counters = {}  # numId → running count for auto-number display
+        new_doc    = Document()
+        self._h4_counters = {}  
 
         # ── STEP 1: EXTRACT ──────────────────────────────────────────────
-        # iter() walks body + table cells + textboxes in document order.
-        # MC:Fallback must be skipped — Word stores textbox content twice:
-        #   mc:Choice  (real, modern rendering)  ← keep
-        #   mc:Fallback (legacy backup)           ← skip
+        
         raw_lines = []
 
         for p_el in source_doc.element.iter(f'{{{W}}}p'):
@@ -150,10 +227,7 @@ class DocumentProcessor:
 
         # ── STEP 2: JOIN ─────────────────────────────────────────────────
         # Word COM PDF→DOCX conversion fragments numbered items across paragraphs:
-        #   ["1"]  [". Customer opens..."]          → "1. Customer opens..."
-        #   ["3"]  [")"]  [". System validates..."] → "3. System validates..."
-        #   ["6"]  (nothing joinable)               → emit as "6." placeholder
-        # Also converts lone "-" paragraph markers into dash-bullet prefix.
+
         joined = []
         i = 0
         while i < len(raw_lines):
@@ -236,16 +310,7 @@ class DocumentProcessor:
         raw_lines = joined
 
         # ── STEP 3: CLASSIFY + BUILD ──────────────────────────────────────
-        # All signals are purely structural — no hardcoded keywords.
-        # This means the classifier adapts to any document regardless of domain.
-        #
-        # Signal reliability per document type:
-        #   Native DOCX:     style names reliable, run_size reliable, bold reliable
-        #   Word COM output: only 'Heading 1' style preserved; bold/size stripped
-        #                    → rely on numId, structural patterns, run_size fallback
-        #
-        # expecting_list tracks whether we're inside a label-introduced section
-        # (e.g. "Tasks:" → following lines are bullets until next heading)
+        
         expecting_list = False
 
         for item in raw_lines:
@@ -279,10 +344,7 @@ class DocumentProcessor:
                 expecting_list = False
 
             # ── H2 ───────────────────────────────────────────────────────
-            # Signals: named style, large run size (≥26 half-pts = 13pt+),
-            # bold+size combo, or structural "TitleWord Number:" pattern.
-            # ⚠ The regex only catches "Word 1:" style — all-caps ("PHASE 2:")
-            # or underscored ("Sprint_1:") won't match. Add patterns if needed.
+            
             elif (
                 'Heading 2' in style
                 or run_size >= 26
@@ -368,7 +430,13 @@ class DocumentProcessor:
 
         # ── STEP 4: BRAND ────────────────────────────────────────────────
         branded_doc = self.style_manager.apply_template_styles(new_doc)
+        
+        # Apply optional features
+        self._apply_final_features(branded_doc)
+        
         branded_doc.save(out)
+        import time
+        time.sleep(1)
         return {'success': True, 'paragraphs': len(new_doc.paragraphs)}
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -381,6 +449,10 @@ class DocumentProcessor:
             elements    = adobe_pdf_extract(path, ADOBE_CLIENT_ID, ADOBE_CLIENT_SECRET)
             doc         = self._build_from_adobe_json(elements)
             branded_doc = self.style_manager.apply_template_styles(doc)
+            
+            # Apply optional features
+            self._apply_final_features(branded_doc)
+
             branded_doc.save(out)
             return {'success': True}
         except Exception as e:
@@ -433,6 +505,7 @@ class DocumentProcessor:
 
         return doc
 
+
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # HTML TABLE HELPER
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -447,8 +520,8 @@ class DocumentProcessor:
             return
         table = doc.add_table(rows=len(rows), cols=cols)
         try:    table.style = 'Table Grid'
-        except: pass
+        except Exception: pass
         for i, row in enumerate(rows):
             for j, cell in enumerate(row.find_all(['td', 'th'])):
                 if j < cols:
-                    table.rows[i].cells[j].text = cell.get_text().strip()
+                    table.rows[i].cells[j].text = cell.get_text(separator=' ').strip()

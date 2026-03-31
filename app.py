@@ -1,159 +1,108 @@
 """
-app.py 
+Main application file with JWT authentication and Session Reset
 """
+from datetime import timedelta
+from flask import Flask, jsonify, render_template, redirect, request, url_for, make_response
+from flask_jwt_extended import JWTManager, verify_jwt_in_request, get_jwt_identity, get_jwt, unset_jwt_cookies
+from flask_cors import CORS
+from config import SQLALCHEMY_DATABASE_URI, SQLALCHEMY_TRACK_MODIFICATIONS, APP_INSTANCE_ID 
+from utils.db_manager import db, init_db
 
-import os
-import datetime
-import traceback
-from flask import Flask, request, send_file, jsonify, render_template, url_for
 
-from document_processor import DocumentProcessor
-from utils.file_processor import FileProcessor
-from utils.db_manager import DatabaseManager
-from config import UPLOAD_FOLDER, OUTPUT_FOLDER, SECRET_KEY, MAX_FILE_SIZE, TEMPLATE_DOCX
-
+   
 app = Flask(__name__)
-app.config.update(
-    SECRET_KEY=SECRET_KEY,
-    UPLOAD_FOLDER=UPLOAD_FOLDER,
-    OUTPUT_FOLDER=OUTPUT_FOLDER,
-    MAX_CONTENT_LENGTH=MAX_FILE_SIZE
-)
 
-processor       = DocumentProcessor(TEMPLATE_DOCX)
-file_processor = FileProcessor(OUTPUT_FOLDER)
-db              = DatabaseManager()
+CORS(app, supports_credentials=True)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = SQLALCHEMY_TRACK_MODIFICATIONS
+
+# Every restart = new key = old cookies invalid = login required
+app.config['SECRET_KEY'] = APP_INSTANCE_ID
+app.config['JWT_SECRET_KEY'] = APP_INSTANCE_ID
+
+app.config['JWT_TOKEN_LOCATION'] = ['cookies']
+app.config['JWT_COOKIE_HTTPONLY'] = True
+app.config['JWT_COOKIE_SECURE'] = False
+app.config['JWT_COOKIE_CSRF_PROTECT'] = False
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)  # ← Bug 2 fix: was int not timedelta
+
+jwt = JWTManager(app)
+init_db(app)
+
+from route.auth import auth_bp
+from route.process import process_bp
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(process_bp, url_prefix='/api/process')
 
 
-@app.route('/', methods=['GET'])
+# ── FRONTEND ROUTES ────────────────────────────────────────
+
+@app.route('/login')
+def login_page():
+    return render_template('login.html')
+
+@app.route('/')
 def index():
-    return render_template('upload.html')
-
-
-@app.route('/api/v1/process', methods=['POST'])
-def process_documents():
-    job_id = None
-    temp_files = []
     try:
-        text_input    = request.form.get('text_input', '').strip()
-        files         = request.files.getlist('files[]')
-        include_cover = request.form.get('include_cover') == 'true'
-        include_toc   = request.form.get('include_toc')   == 'true'
+        verify_jwt_in_request(optional=True)
+        user_id = get_jwt_identity()
 
-        processing_queue = []
-        has_files        = any(f and f.filename for f in files)
+        if not user_id:
+            return redirect(url_for('login_page'))
 
-        if not text_input and not has_files:
-            return jsonify({'success': False, 'error': 'No input provided.'}), 400
+        claims = get_jwt()
+        token_instance = claims.get('instance_id')
+        
+        if token_instance != APP_INSTANCE_ID:
+            print("❌ Instance mismatch — forcing re-login")
+            response = make_response(redirect(url_for('login_page')))
+            unset_jwt_cookies(response)
+            return response
 
-        # Rich-text editor
-        if text_input:
-            doc_obj = processor.html_to_docx(text_input)   # public method
-            name = f"editor_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-            path = os.path.join(app.config['UPLOAD_FOLDER'], name)
-            doc_obj.save(path)
-            processing_queue.append(path)
-            temp_files.append(path)
-
-        # File uploads
-        for file in files:
-            if file and file.filename:
-                safe = os.path.basename(file.filename)
-                in_path  = os.path.join(app.config['UPLOAD_FOLDER'], safe)
-                out_name = f'proc_{safe}.docx'
-                out_path = os.path.join(app.config['UPLOAD_FOLDER'], out_name)
-                file.save(in_path)
-
-                res = processor.universal_extract(in_path, out_path)
-                if res['success']:
-                    processing_queue.append(out_path)
-                    temp_files.extend([in_path, out_path])
-                else:
-                    print(f'[App] Extraction failed for {safe}: {res.get("error")}')
-
-        if not processing_queue:
-            return jsonify({'success': False, 'error': 'No files processed.'}), 500
-
-        original_names = [f.filename for f in files if f and f.filename]
-        if text_input:
-            original_names.insert(0, 'Rich Text Input')
-        job_id = db.create_job(len(processing_queue), original_names)
-
-        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        final_name = f'Document_{ts}.docx'
-        final_path = os.path.join(app.config['OUTPUT_FOLDER'], final_name)
-
-        ok = file_processor.process_file(
-            processing_queue, final_path,
-            include_cover=include_cover,
-            include_toc=include_toc
-        )
-
-        for p in temp_files:
-            try:
-                if os.path.exists(p): os.remove(p)
-            except OSError:
-                pass
-
-        if ok:
-            db.complete_job(job_id, final_name)
-            return jsonify({'success': True, 'data': {
-                'filename': final_name,
-                'redirect_url': url_for('result_page', filename=final_name)}})
-        else:
-            db.fail_job(job_id, 'Merge failed.')
-            return jsonify({'success': False, 'error': 'Merge failed.'}), 500
+        response = make_response(render_template('upload.html'))
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+        return response
 
     except Exception as e:
-        print(f'[App] Critical: {e}')
-        traceback.print_exc()
-        if job_id:
-            db.fail_job(job_id, str(e))
-        return jsonify({'success': False, 'error': str(e)}), 500
+        print(f"❌ Authentication error: {e}")
+        return redirect(url_for('login_page'))
 
 
-@app.route('/result/<filename>')
-def result_page(filename):
-    return render_template('result.html',
-        success=True,
-        filename=filename )
+# ── API ROUTES ─────────────────────────────────────────────
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    return jsonify({'success': True, 'message': 'Prisma API is running', 'version': '1.0.0'}), 200
 
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    path = os.path.join(app.config['OUTPUT_FOLDER'], os.path.basename(filename))
-    if os.path.exists(path):
-        return send_file(path, as_attachment=True)
-    return 'File not found', 404
+# ── JWT ERROR HANDLERS ─────────────────────────────────────
+# Bug 3 fix: handlers now redirect browser requests, return JSON for API calls
 
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'Token expired'}), 401
+    response = make_response(redirect(url_for('login_page')))
+    unset_jwt_cookies(response)
+    return response
 
-@app.route('/download-pdf/<filename>')
-def download_pdf(filename):
-    """Windows-only PDF conversion. COM libraries imported here, not at module level."""
-    try:
-        import pythoncom
-        from docx2pdf import convert
-    except ImportError:
-        return 'PDF conversion requires Windows + Microsoft Word.', 501
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'Invalid token'}), 401
+    response = make_response(redirect(url_for('login_page')))
+    unset_jwt_cookies(response)
+    return response
 
-    pythoncom.CoInitialize()
-    try:
-        docx_path    = os.path.join(app.config['OUTPUT_FOLDER'], os.path.basename(filename))
-        pdf_filename = filename.replace('.docx', '.pdf')
-        pdf_path     = os.path.join(app.config['OUTPUT_FOLDER'], pdf_filename)
-        if not os.path.exists(docx_path):
-            return f'File not found: {filename}', 404
-        convert(docx_path, pdf_path)
-        return send_file(pdf_path, as_attachment=True)
-    except Exception as e:
-        traceback.print_exc()
-        return f'PDF error: {e}', 500
-    finally:
-        try: pythoncom.CoUninitialize()
-        except Exception: pass
+@jwt.unauthorized_loader
+def missing_token_callback(error):
+    if request.path.startswith('/api/'):
+        return jsonify({'success': False, 'error': 'No token provided'}), 401
+    return redirect(url_for('login_page'))
 
 
 if __name__ == '__main__':
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     app.run(debug=True, host='0.0.0.0', port=5000)

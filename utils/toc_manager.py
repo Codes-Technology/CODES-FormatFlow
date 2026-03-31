@@ -1,23 +1,6 @@
 """
 TocManager — Word-native Table of Contents
 
-KEY DECISIONS (each has a reason — do not change without reading):
-
-  \\o "1-3" only, NO \\u switch:
-    \\u requires outlineLvl set on each paragraph's own pPr.
-    Heading styles don't set per-para outlineLvl, so \\u finds nothing
-    and every entry shows page 1. \\o "1-3" works from style assignment alone.
-
-  Page break, NOT section break:
-    A section break splits the doc into Section 1 (TOC) and Section 2 (content).
-    Word restarts page count at 1 for Section 2, so all TOC entries show page 1.
-    A simple page break keeps ONE section — pages count continuously:
-    page 1 = TOC, page 2+ = content, headings get real numbers.
-
-  dirty=true on fldChar begin:
-    Forces Word to recalculate the TOC field every time the document opens,
-    so page numbers are always up to date without the user needing to manually
-    right-click and update.
 """
 
 from docx import Document
