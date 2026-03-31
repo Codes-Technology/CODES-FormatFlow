@@ -23,7 +23,7 @@ FormatFlow is a professional-grade document processing and generation platform d
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/your-username/formatflow.git
+    git clone https:/github.com/Codes-Technology/CODES-FormatFlow.git
     cd formatflow
     ```
 
