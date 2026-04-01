@@ -890,9 +890,33 @@
 
         .edit-area {
             width: 100%;
-            border-radius: 6px;
-            padding: 6px;
+            border: 1px solid var(--border);
+            background: var(--surface-2);
+            color: var(--text);
+            border-radius: 8px;
+            padding: 8px;
+            margin-top: 8px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            resize: vertical;
+        }
+
+        .user-meta {
+            display: flex !important;
+            gap: 12px;
+            font-size: 0.78rem;
+            color: #b0b0b0; /* Improved visibility for all themes */
             margin-top: 6px;
+            user-select: none;
+            opacity: 1 !important;
+            align-items: center;
+            z-index: 10;
+        }
+
+        .user-meta i {
+            font-size: 0.85rem;
+            margin-right: -2px;
         }
 
         /* Dark Mode Toolbar Overrides */
@@ -1153,7 +1177,11 @@
                 fileLabel: document.getElementById('file-name-label'),
                 fileInput: document.getElementById('fileInput'),
                 inputHint: document.getElementById('inputHint'),
-                themeIcon: document.getElementById('themeIcon')
+                themeIcon: document.getElementById('themeIcon'),
+                // FIX B2: Store mode pill buttons so switchMode() can toggle them
+                modeText: document.getElementById('modeText'),
+                modeFile: document.getElementById('modeFile'),
+                textInputWrapper: document.getElementById('textInputWrapper')
             }
         };
         tinymce.init({
@@ -1174,7 +1202,8 @@
                 });
                 editor.on('input change keyup', function () {
                     updateSendState();
-                    if (!FormatApp.isTitleLocked) {
+                    // NEW: Only update sidebar title if not locked AND chat is already saved (has jobId)
+                    if (!FormatApp.isTitleLocked && FormatApp.currentJobId) {
                         const text = editor.getContent({ format: 'text' }).trim();
                         const firstLine = text.split('\n')[0].trim().slice(0, 40);
                         if (firstLine) updateActiveSidebarTitle(firstLine);
@@ -1233,8 +1262,44 @@
         }
 
         // ── INIT ───────────────────────────────────────────────
-        // Small delay so browser has time to apply the session cookie before fetch
-        setTimeout(() => loadSidebar(), 150);
+        async function initializeApp() {
+            try {
+                const r = await fetch('/api/process/conversations', { 
+                    credentials: 'include' 
+                });
+                
+                if (!r.ok) {
+                    console.error('Failed to load conversations');
+                    if (r.status === 401) {
+                        window.location.href = '/login';
+                    }
+                    return;
+                }
+                
+                const jobs = await r.json();
+                const favList = document.getElementById('favList');
+                const chatList = document.getElementById('chatList');
+                
+                if (favList) favList.innerHTML = '';
+                if (chatList) chatList.innerHTML = '';
+                
+                (Array.isArray(jobs) ? jobs : []).forEach(job => {
+                    const targetList = job.IsFavorite ? favList : chatList;
+                    addConvItem(targetList, job.id, job.title || 'Untitled', false, job.IsFavorite);
+                });
+                
+                // ✅ AUTO-LOAD MOST RECENT CONVERSATION
+                if (jobs && jobs.length > 0) {
+                    await loadConversation(jobs[0].id);
+                }
+                
+            } catch (err) {
+                console.error('App initialization error:', err);
+            }
+        }
+
+        // Start the app
+        initializeApp();
 
         // ── TEXT INPUT EVENTS ──────────────────────────────────
         function updateSendState() {
@@ -1412,10 +1477,18 @@
                 }
 
                 if (result.success && result.jobId) {
+                    const isNewChat = !FormatApp.currentJobId;
                     FormatApp.currentJobId = result.jobId;
+
+                    if (isNewChat && result.jobName) {
+                        // Update "Untitled" to the new smart title
+                        updateActiveSidebarTitle(result.jobName);
+                        // Optional: Keep it locked if you don't want it to change again
+                        FormatApp.isTitleLocked = true; 
+                    }
                 }
 
-                if (result.success && result.historyId && !hasFile && userDataId) {
+                if (result.success && result.historyId && userDataId) {
                     const uRow = document.getElementById(userDataId);
                     if (uRow) {
                         const textContainer = uRow.querySelector('.user-text-container');
@@ -1426,12 +1499,20 @@
                         const editBtn = uRow.querySelector('.edit-btn');
                         if (editBtn) {
                             editBtn.disabled = false;
-                            editBtn.style.opacity = '0.8';
+                            editBtn.style.opacity = '1';
+                            // RETROACTIVELY SET THE ONCLICK HANDLER
+                            editBtn.setAttribute('onclick', `editText(${result.historyId}, this)`);
+                        }
+                        const counter = uRow.querySelector('.processed-counter');
+                        if (counter && result.processingCount) {
+                            counter.textContent = result.processingCount;
                         }
                     }
                 }
 
-                const labelStr = hasFile ? FormatApp.selectedFile.name : txtContent;
+                // FIX B6: Capture filename BEFORE clearFile() nulls it
+                const fileLabel = hasFile && FormatApp.selectedFile ? FormatApp.selectedFile.name : null;
+                const labelStr = hasFile ? (fileLabel || 'Document') : txtContent;
                 replaceBotBubble(botId, result, settings, labelStr);
 
                 if (result.success) {
@@ -1471,12 +1552,14 @@
                 // Always render user text with edit capability
                 // historyId may be null initially; the retroactive update sets it after processing
                 bub.style.position = 'relative';
+                // USE innerHTML if the text looks like HTML (contains tags), else stay safe with textContent
+                const containsHtml = /<[a-z][\s\S]*>/i.test(text);
                 bub.innerHTML = `
                     <div class="user-text-container"
                          data-history-id="${historyId || ''}"
                          data-original-text="${escapeHtml(text)}"
                          style="width:100%; min-width:150px;">
-                        <div class="user-text" style="white-space: pre-wrap;">${escapeHtml(text)}</div>
+                        <div class="user-text" style="white-space: pre-wrap;">${containsHtml ? text : escapeHtml(text)}</div>
                     </div>
                 `;
             }
@@ -1484,31 +1567,58 @@
             if (type === 'user') {
                 const wrapper = document.createElement('div');
                 wrapper.className = 'user-bubble-wrapper';
-                wrapper.style.cssText = 'display:flex; flex-direction:column; align-items:flex-end;';
-
+                wrapper.style.cssText = 'display:flex; flex-direction:column; align-items:flex-end; width:100%;';
                 wrapper.appendChild(bub);
 
-                // Meta row with timestamp + processed count + edit button
-                // Always create it; edit button hidden until historyId is available
+                const isActualFile = isFile || (text && text.includes('📄 Processed File:'));
                 const metaDiv = document.createElement('div');
                 metaDiv.className = 'user-meta';
-                metaDiv.style.cssText = 'display:flex; gap:12px; font-size:0.75rem; color:var(--text-muted); margin-top:4px; justify-content:flex-end; align-items:center;';
-                metaDiv.innerHTML = `
-                    <span>${timeStr || new Date().toLocaleString()}</span>
-                    <span class="processed-counter">Processed: ${processingCount || 1}</span>
-                    <button class="edit-btn" title="Edit"
-                        style="background:none;border:none;padding:2px;cursor:pointer;color:var(--text-muted);opacity:${historyId ? '0.8' : '0.3'};display:flex;align-items:center;"
-                        ${historyId ? '' : 'disabled'}>
-                        <i class="bi bi-pencil-square" style="font-size:13px;"></i>
-                    </button>
+                
+                let metaHTML = `
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <i class="bi bi-clock-history"></i>
+                        <span>${toIST(timeStr || new Date())}</span>
+                    </div>
                 `;
-                wrapper.appendChild(metaDiv);
 
+                if (!isActualFile) {
+                    metaHTML += `
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <i class="bi bi-arrow-repeat"></i>
+                            <span class="processed-counter">${processingCount || 1}</span>
+                        </div>
+                        <button class="edit-btn" title="Edit message"
+                            style="background:none; border:none; padding:0; cursor:pointer; color:inherit; display:flex; align-items:center; gap:4px; font-weight:500;"
+                            ${historyId ? '' : 'disabled'}>
+                            <i class="bi bi-pencil"></i>
+                            <span>Edit</span>
+                        </button>
+                    `;
+                }
+                
+                metaDiv.innerHTML = metaHTML;
+                wrapper.appendChild(metaDiv);
                 row.appendChild(wrapper);
                 row.appendChild(ava);
             } else {
+                const wrapper = document.createElement('div');
+                wrapper.className = 'bot-bubble-wrapper';
+                wrapper.style.cssText = 'display:flex; flex-direction:column; align-items:flex-start; width:100%;';
+                wrapper.appendChild(bub);
+
+                const metaDiv = document.createElement('div');
+                metaDiv.className = 'user-meta';
+                // Always use IST for bot responses too
+                metaDiv.innerHTML = `
+                    <div style="display:flex; align-items:center; gap:6px;">
+                        <i class="bi bi-clock-history"></i>
+                        <span>Processed at ${toIST(timeStr || new Date())}</span>
+                    </div>
+                `;
+                wrapper.appendChild(metaDiv);
+                
                 row.appendChild(ava);
-                row.appendChild(bub);
+                row.appendChild(wrapper);
             }
 
             FormatApp.elements.display.appendChild(row);
@@ -1540,25 +1650,21 @@
             const bub = row.querySelector('.bubble.bot');
 
             if (result.success) {
-                // CLEAN BOT RESPONSE (NO RESULT CARD HERE)
+                // CLEAN BOT RESPONSE (NO REPEATING USER TEXT)
                 bub.innerHTML = `
                     <div class="bot-name">FormatFlow AI</div>
-                    <div>
-                        Document formatted with 
-                        <strong>${settings.fontFamily} ${settings.fontSize}pt</strong>.
-                    </div>
-
-                    <div style="font-size:0.75rem;color:var(--text-muted);margin-top:8px;">
-                        🕒 Processed at ${new Date().toLocaleTimeString('en-US', {
-                    hour: 'numeric',
-                    minute: '2-digit',
-                    hour12: true
-                })}
+                    <div class="bot-text">
+                        Your document has been formatted successfully.
                     </div>
                 `;
+                
+                const meta = row.querySelector('.user-meta span');
+                if (meta) {
+                    meta.textContent = `Processed at ${toIST(result.time || new Date())}`;
+                }
 
                 //SHOW RESULT SEPARATELY
-                renderResultCard(result, content);
+                renderResultCard(result);
 
             } else {
                 bub.innerHTML = `
@@ -1574,15 +1680,20 @@
 
 
         // FINAL CLEAN RESULT CARD
-        function renderResultCard(result) {
+        // FIX B1: Accept content parameter (used for accessibility/title in future)
+        function renderResultCard(result, content) {
             const card = document.createElement('div');
             card.className = 'result-card';
+
+            // FIX: Avoid "2s sec" by checking if processingTime already has a unit
+            const pTime = result.processingTime != null ? String(result.processingTime) : '';
+            const displayTime = pTime.toLowerCase().endsWith('s') || pTime.toLowerCase().endsWith('sec') ? pTime : (pTime ? pTime + ' sec' : '');
 
             card.innerHTML = `
                 <div class="rc-title">Your document is ready</div>
 
-                ${result.processingTime != null ? `<div class="rc-meta" style="font-size: 0.82rem; color: var(--text-muted);">
-                    ⏱ Processing Time: <strong>${result.processingTime} sec</strong>
+                ${displayTime ? `<div class="rc-meta" style="font-size: 0.82rem; color: var(--text-muted);">
+                    ⏱ Processing Time: <strong>${displayTime}</strong>
                 </div>` : ''}
 
                 <div class="dl-btns">
@@ -1591,7 +1702,7 @@
                         <i class="bi bi-file-earmark-word"></i> Download DOCX
                     </a>
 
-                    <button onclick="downloadPDF(${result.historyId})"
+                    <button onclick="downloadPDF(${result.historyId}, event)"
                         class="dl-btn secondary">
                         <i class="bi bi-file-earmark-pdf"></i> Download PDF
                     </button>
@@ -1655,51 +1766,35 @@
         // SIDEBAR LOADER
         async function loadSidebar() {
             try {
-                const r = await fetch('/api/process/conversations', { credentials: 'include' });
-                console.log('[Sidebar] Status:', r.status);
-
+                const r = await fetch('/api/process/conversations', { 
+                    credentials: 'include' 
+                });
+                
                 if (!r.ok) {
-                    const errText = await r.text();
-                    console.error('[Sidebar] Error response:', errText);
-                    if (r.status === 401) {
-                        console.warn('[Sidebar] 401 — session may have expired. Re-login required.');
-                    }
+                    console.error('Failed to load sidebar:', r.status);
                     return;
                 }
-
+                
                 const jobs = await r.json();
-                console.log('[Sidebar] Jobs received:', jobs);
-
-                if (!Array.isArray(jobs)) {
-                    console.error('[Sidebar] Response is not an array:', jobs);
-                    return;
-                }
-
                 const favList = document.getElementById('favList');
                 const chatList = document.getElementById('chatList');
-
-                favList.innerHTML = '';
-                chatList.innerHTML = '';
-
-                jobs.forEach(job => {
+                
+                if (favList) favList.innerHTML = '';
+                if (chatList) chatList.innerHTML = '';
+                
+                (Array.isArray(jobs) ? jobs : []).forEach(job => {
                     const targetList = job.IsFavorite ? favList : chatList;
                     addConvItem(targetList, job.id, job.title || 'Untitled', false, job.IsFavorite);
                 });
-
+                
                 // Re-highlight current conversation
                 if (FormatApp.currentJobId) {
                     const activeItem = document.querySelector(`.conv-item[data-id="${FormatApp.currentJobId}"]`);
                     if (activeItem) activeItem.classList.add('active');
                 }
-
-                // Auto-load the most recent chat on first page load
-                if (FormatApp.isFirstLoad && !FormatApp.currentJobId && jobs.length > 0) {
-                    loadConversation(jobs[0].id);
-                }
-                FormatApp.isFirstLoad = false;
-
-            } catch (e) {
-                console.error('Sidebar load failed:', e);
+                
+            } catch (err) {
+                console.error('Sidebar load error:', err);
             }
         }
 
@@ -1797,8 +1892,8 @@
                 if (res.success) {
                     const item = document.querySelector(`.conv-item[data-id="${id}"]`);
                     if (item) item.remove();
-                    // If we were viewing this chat, start a new one
-                    if (FormatApp.currentJobId === id) newChat();
+                    // FIX B3: Use == for type-coercion comparison (id is number, currentJobId is string)
+                    if (String(FormatApp.currentJobId) === String(id)) newChat();
                 } else {
                     showToast(res.error || "Failed to delete");
                 }
@@ -1846,59 +1941,82 @@
         async function loadConversation(id) {
             const els = FormatApp.elements;
             try {
-                const r = await fetch(`/api/process/conversation/${id}`, { credentials: 'include' });
+                const r = await fetch(`/api/process/conversation/${id}`, { 
+                    credentials: 'include' 
+                });
+                
                 if (!r.ok) {
                     showToast("Could not load conversation");
                     return;
                 }
+                
                 const history = await r.json();
 
                 // Set state
                 FormatApp.currentJobId = id;
+                FormatApp.isTitleLocked = true;
                 if (els.welcome) els.welcome.style.display = 'none';
+                
                 if (els.inputArea && els.inputArea.classList.contains('centered')) {
                     els.inputArea.classList.remove('centered');
                 }
+                
+                // Clear existing messages
                 if (els.display) els.display.querySelectorAll('.msg-row, .result-card').forEach(e => e.remove());
 
-                // Highlight active Sidebar Item
+                // Highlight active sidebar item
                 document.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
                 const activeItem = document.querySelector(`.conv-item[data-id="${id}"]`);
                 if (activeItem) activeItem.classList.add('active');
 
-                // Render history
+                // ✅ Render history properly
                 for (let msg of history) {
-                    const isFile = msg.type && (msg.type.toLowerCase() === 'file' || msg.type === 'File');
-                    const p_text = isFile ? (msg.uploadFileName || msg.summary || "Document") : (msg.rawText || msg.summary || "Text Input");
+                    let displayText = '';
+                    const isFile = msg.type === 'File' || msg.Type === 'File';
+                    
+                    if (isFile) {
+                        displayText = msg.uploadFileName || 'Document';
+                    } else {
+                        if (msg.rawText) {
+                            const tmp = document.createElement('div');
+                            tmp.innerHTML = msg.rawText;
+                            displayText = tmp.textContent || tmp.innerText || msg.summary || 'Text Input';
+                        } else {
+                            displayText = msg.summary || 'Text Input';
+                        }
+                    }
+                    
+                    // Render user message
+                    const metaTime = msg.timestamp || msg.Timestamp || msg.CreatedDate || '';
+                    appendMessage(displayText, 'user', isFile, msg.id, null, metaTime, msg.processingCount || msg.ProcessingCount || 1);
 
-                    const tmp = document.createElement('div');
-                    tmp.innerHTML = p_text;
-                    const plainText = tmp.textContent || tmp.innerText || "";
-
-                    const metaTime = msg.time || msg.timestamp || msg.createdDate;
-
-                    appendMessage(plainText, 'user', isFile, msg.id, null, metaTime, msg.processingCount);
+                    // Render bot response
+                    const mock_result = {
+                        success: msg.status === 'Success' || msg.Status === 'Success',
+                        historyId: msg.id,
+                        error: msg.errorMessage || msg.ErrorMessage,
+                        processingTime: '2s',
+                        time: metaTime
+                    };
+                    
+                    const mock_settings = {
+                        fontFamily: msg.fontFamily || msg.FontFamily || 'Calibri',
+                        fontSize: msg.fontSize || msg.FontSize || 11
+                    };
 
                     const botId = 'msg-' + msg.id;
                     appendTyping(botId);
-
-                    const mock_result = {
-                        success: msg.status === 'Success',
-                        historyId: msg.id,
-                        error: msg.errorMessage
-                    };
-                    const mock_settings = {
-                        fontFamily: msg.fontFamily,
-                        fontSize: msg.fontSize
-                    };
-
-                    let labelStr = isFile ? (msg.uploadFileName || 'Document') : plainText;
-                    replaceBotBubble(botId, mock_result, mock_settings, labelStr);
+                    
+                    // Small delay for better UX
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    
+                    replaceBotBubble(botId, mock_result, mock_settings, displayText);
                 }
+                
                 scrollToBottom();
 
             } catch (e) {
-                console.error(e);
+                console.error('Load conversation error:', e);
                 showToast("Failed to load conversation history.");
             }
         }
@@ -1914,7 +2032,7 @@
             }
             document.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
             FormatApp.currentJobId = null;
-            FormatApp.isTitleLocked = false;
+            FormatApp.isTitleLocked = true; // Lock 'Untitled' until first process
 
             const list = document.getElementById('chatList');
             if (list) {
@@ -1984,8 +2102,9 @@
             setTimeout(() => t.style.display = 'none', ms);
         }
         // ── PDF DOWNLOAD HANDLER ──────────────────────────────
-        async function downloadPDF(historyId) {
-            const btn = event.currentTarget || document.activeElement;
+        // FIX B7: Accept event as parameter instead of using global deprecated `event`
+        async function downloadPDF(historyId, evt) {
+            const btn = (evt && evt.currentTarget) || document.activeElement;
             const originalHTML = btn.innerHTML;
 
             try {
@@ -2072,13 +2191,7 @@
                 const cancelBtn = document.createElement('button');
                 cancelBtn.className = 'dl-btn secondary';
                 cancelBtn.textContent = 'Cancel';
-                cancelBtn.onclick = (ev) => {
-                    ev.stopPropagation();
-                    textDiv.innerHTML = '';
-                    textDiv.innerText = textDiv.dataset.oldText || '';
-                    const userMeta = wrapper.querySelector('.user-meta');
-                    if (userMeta) userMeta.style.display = 'flex';
-                };
+                cancelBtn.onclick = null;  // FIX B8: Will be properly set below after bubble reference is available
 
                 const saveBtn = document.createElement('button');
                 saveBtn.className = 'dl-btn primary';
@@ -2113,13 +2226,13 @@
 
                             const counter = wrapper.querySelector('.processed-counter');
                             if (counter && result.processingCount) {
-                                counter.innerText = 'Processed: ' + result.processingCount;
+                                counter.innerText = result.processingCount;
                             }
 
                             // UPDATE: Refresh the timestamp to the current processing time
                             const timeSpan = wrapper.querySelector('.user-meta span:first-child');
                             if (timeSpan && result.time) {
-                                timeSpan.innerText = result.time;
+                                timeSpan.innerText = toIST(result.time);
                             }
                             const botId = 'edit-reply-' + Date.now();
                             appendTyping(botId);
@@ -2179,6 +2292,39 @@
                 return;
             }
         });
+        // SAFE HTML ESCAPE
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function toIST(dateInput) {
+            if (!dateInput) return '';
+            let date;
+            if (typeof dateInput === 'string') {
+                // Handle HH:MM AM/PM input from server (Assume it's UTC)
+                if (/^\d{1,2}:\d{2} (AM|PM)$/i.test(dateInput)) {
+                    try {
+                        const [time, period] = dateInput.split(' ');
+                        let [h, m] = time.split(':').map(Number);
+                        if (period.toUpperCase() === 'PM' && h < 12) h += 12;
+                        if (period.toUpperCase() === 'AM' && h === 12) h = 0;
+                        date = new Date();
+                        date.setUTCHours(h, m, 0, 0);
+                    } catch (e) { date = new Date(dateInput); }
+                } else {
+                    const clean = dateInput.replace(' ', 'T');
+                    date = new Date(clean.includes('Z') || clean.includes('+') ? clean : clean + 'Z');
+                }
+            } else {
+                date = dateInput;
+            }
+            if (!date || isNaN(date.getTime())) return dateInput;
+            return date.toLocaleTimeString('en-US', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: true });
+        }
+
         // Force send button re-check after initialization
         setTimeout(() => updateSendState(), 150);
     </script>

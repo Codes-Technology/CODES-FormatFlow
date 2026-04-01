@@ -56,7 +56,7 @@ class CoverPageManager:
         # 5. Title (ends up at index 0 — very top)
         body.insert(0, self._create_centered_para(doc, title.upper(), 22, bold=True)._element)
 
-        print('[Cover Page] ✅ Injection complete')
+        print('[Cover Page] Injection complete')
         return True
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

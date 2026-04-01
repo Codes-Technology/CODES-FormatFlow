@@ -6,7 +6,7 @@ from flask import Flask, jsonify, render_template, redirect, request, url_for, m
 from flask_jwt_extended import JWTManager, verify_jwt_in_request, get_jwt_identity, get_jwt, unset_jwt_cookies
 from flask_cors import CORS
 from config import SQLALCHEMY_DATABASE_URI, SQLALCHEMY_TRACK_MODIFICATIONS, APP_INSTANCE_ID 
-from utils.db_manager import db, init_db
+from utils.db_manager import init_db
 
 
    

@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import time
 import requests
@@ -12,9 +13,19 @@ from config import TEMPLATE_DOCX
 from io import BytesIO
 import pythoncom
 from docx2pdf import convert
-from utils.text_utils import clean_html, normalize_filename, get_first_sentence
+# Helper Functions
+def clean_html(text):
+    """Remove HTML tags from a string."""
+    if not text: return ""
+    return re.sub(r'<[^>]+>', '', text)
+
+def normalize_filename(s):
+    """Sanitize a string for use as a filename."""
+    if not s: return "document"
+    # Remove special chars, replace spaces with underscores
+    s = re.sub(r'[^\w\s-]', '', s).strip()
+    return re.sub(r'[-\s]+', '_', s)
 import logging
-import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,7 +35,7 @@ process_bp = Blueprint('process', __name__)
 
 
 # ==============================
-# ✅ SMART TITLE GENERATOR
+# SMART TITLE GENERATOR
 # ==============================
 def generate_title(text):
     """
@@ -67,7 +78,7 @@ def generate_title(text):
 
 
 # ==============================
-# ✅ UNIQUE FILENAME GENERATOR
+# UNIQUE FILENAME GENERATOR
 # ==============================
 def generate_unique_filename(base_name, current_user):
     clean_name = normalize_filename(base_name)
@@ -87,7 +98,7 @@ def generate_unique_filename(base_name, current_user):
 
 
 # ==============================
-# 🔥 PROCESS TEXT
+# PROCESS TEXT
 # ==============================
 @process_bp.route('/process-text', methods=['POST'])
 @require_auth
@@ -155,6 +166,7 @@ def process_text(current_user):
             'success': True, 
             'historyId': history.Id, 
             'jobId': job.Id,
+            'jobName': job.JobName,
             'processingTime': processing_time,
             'time': datetime.now().strftime('%d %b %Y, %I:%M %p'),
             'processingCount': processing_count
@@ -168,7 +180,7 @@ def process_text(current_user):
 
 
 # ==============================
-# 🔥 PROCESS FILE
+# PROCESS FILE
 # ==============================
 @process_bp.route('/process-file', methods=['POST'])
 @require_auth
@@ -213,7 +225,7 @@ def process_file(current_user):
             with open(input_path, 'rb') as f:
                 original_file_data = f.read()
 
-        # ✅ Job handling
+        # Job handling
         if job_id and job_id != 'null':
             job = ProcessingJob.query.filter_by(Id=job_id, UserId=current_user.Id).first()
             if not job:
@@ -250,6 +262,7 @@ def process_file(current_user):
             'success': True, 
             'historyId': history.Id, 
             'jobId': job.Id,
+            'jobName': job.JobName,
             'processingTime': processing_time,
             'time': datetime.now().strftime('%d %b %Y, %I:%M %p'),
             'processingCount': processing_count
@@ -263,7 +276,7 @@ def process_file(current_user):
 
 
 # ==============================
-# ✏️ UPDATE TITLE (UNCHANGED)
+# UPDATE TITLE (UNCHANGED)
 # ==============================
 @process_bp.route('/update-title/<int:job_id>', methods=['POST'])
 @require_auth
@@ -287,7 +300,7 @@ def update_title(current_user, job_id):
 
 
 # ==============================
-# 🗑 DELETE
+# DELETE
 # ==============================
 @process_bp.route('/delete/<int:job_id>', methods=['DELETE'])
 @require_auth
@@ -309,7 +322,7 @@ def delete_conversation(current_user, job_id):
 
 
 # ==============================
-# 📂 SIDEBAR
+# SIDEBAR
 # ==============================
 @process_bp.route('/conversations', methods=['GET'])
 @require_auth
@@ -348,7 +361,7 @@ def toggle_favorite(current_user, job_id):
     })
 
 # ==============================
-# ✏️ EDIT & RE-PROCESS TEXT
+# EDIT & RE-PROCESS TEXT
 # ==============================
 @process_bp.route('/edit-text/<int:history_id>', methods=['POST'])
 @require_auth
@@ -383,6 +396,10 @@ def edit_text(current_user, history_id):
 
         # 3. Create a NEW history entry (to keep the "chat" thread intact)
         new_count = original_history.ProcessingCount + 1
+        
+        # NEW: Generate a descriptive filename for the edited version
+        new_filename = generate_unique_filename(job.JobName, current_user)
+
         new_history = ProcessingJobHistory(
             ProcessJobId=job.Id,
             JobType=JobType.TEXT,
@@ -390,7 +407,7 @@ def edit_text(current_user, history_id):
             UploadFileData=new_text.encode('utf-8'),
             Status=JobStatus.SUCCESS,
             OutputFileData=final_file_data,
-            OutputFileName=original_history.OutputFileName,
+            OutputFileName=new_filename,
             FontFamily=original_history.FontFamily,
             FontSize=original_history.FontSize,
             ProcessingCount=new_count
@@ -415,22 +432,30 @@ def edit_text(current_user, history_id):
         return jsonify({'success': False, 'error': str(e)}), 500
 
 # ==============================
-# 💬 LOAD CHAT
+# LOAD CHAT
 # ==============================
 @process_bp.route('/conversation/<int:job_id>', methods=['GET'])
 @require_auth
 def get_conversation(current_user, job_id):
-    job = ProcessingJob.query.filter_by(Id=job_id, UserId=current_user.Id).first()
-    if not job:
-        return jsonify({'error': 'Unauthorized or not found'}), 404
-
-    histories = ProcessingJobHistory.query.filter_by(ProcessJobId=job_id)\
-        .order_by(ProcessingJobHistory.CreatedDate.asc()).all()
-
-    return jsonify([h.to_dict(include_file_data=True) for h in histories]), 200
+    """Load full conversation history"""
+    try:
+        job = ProcessingJob.query.filter_by(Id=job_id, UserId=current_user.Id).first()
+        if not job:
+            return jsonify({'error': 'Unauthorized or not found'}), 404
+        
+        histories = ProcessingJobHistory.query.filter_by(ProcessJobId=job_id)\
+            .order_by(ProcessingJobHistory.CreatedDate.asc()).all()
+        
+        # ✅ Include file data for rendering
+        return jsonify([h.to_dict(include_file_data=True) for h in histories]), 200
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 # ==============================
-# 📥 DOWNLOAD
+# DOWNLOAD
 # ==============================
 @process_bp.route('/download/<int:history_id>', methods=['GET'])
 @require_auth
@@ -443,6 +468,19 @@ def download_file(current_user, history_id):
             return jsonify({'success': False, 'error': 'Unauthorized access'}), 403
 
         requested_format = request.args.get('format', 'docx').lower()
+
+        # NEW: Construct a descriptive download name based on the CURRENT job title
+        job_name_clean = normalize_filename(job.JobName)
+        # We reuse the same timestamping/count logic if needed, or just the current title
+        # history.OutputFileName contains a timestamp by default; we replace the prefix
+        old_ext = os.path.splitext(history.OutputFileName)[1]
+        timestamp = ""
+        # Extract timestamp if possible (e.g., Title_2026-04-01_11-43.docx)
+        match = re.search(r'_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}', history.OutputFileName)
+        if match:
+             timestamp = match.group(0)
+             
+        final_download_name = f"{job_name_clean}{timestamp}{old_ext}"
 
         if requested_format == 'pdf':
             pythoncom.CoInitialize()
@@ -466,7 +504,7 @@ def download_file(current_user, history_id):
                     BytesIO(pdf_data),
                     mimetype='application/pdf',
                     as_attachment=True,
-                    download_name=history.OutputFileName.replace('.docx', '.pdf')
+                    download_name=final_download_name.replace(old_ext, '.pdf')
                 )
 
             finally:
@@ -479,7 +517,7 @@ def download_file(current_user, history_id):
                 BytesIO(history.OutputFileData),
                 mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 as_attachment=True,
-                download_name=history.OutputFileName
+                download_name=final_download_name
             )
 
     except Exception as e:

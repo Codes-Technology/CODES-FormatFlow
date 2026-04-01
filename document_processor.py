@@ -11,6 +11,7 @@ import tempfile
 from docx import Document
 from docx.oxml.ns import qn
 from docx.text.paragraph import Paragraph
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from bs4 import BeautifulSoup
 from utils.style_manager import StyleManager
 from utils.adobe_helper import adobe_pdf_extract
@@ -52,96 +53,86 @@ class DocumentProcessor:
         doc = Document(self.template_path)
         soup = BeautifulSoup(html, 'html.parser')
 
-        print(f"[DocumentProcessor] Incoming HTML Length: {len(html)}")
+        # If there are NO block-level tags like p, h1, div, etc., 
+        # then this is likely plain text from the 'Edit' box.
+        # In this case, we use the Smart Classifier to detect headings.
+        has_block_tags = bool(soup.find(['p', 'h1', 'h2', 'h3', 'h4', 'div', 'ul', 'ol', 'table']))
 
-        processed_elements = set()
+        if not has_block_tags:
+            print("[DocumentProcessor] Detected plain text input (likely Edit), using Smart Classifier.")
+            lines = html.splitlines()
+            raw_lines = []
+            for line in lines:
+                t = line.strip()
+                if t:
+                    # Mock the signals expected by the classifier
+                    raw_lines.append({
+                        'text': t,
+                        'style': 'Normal',
+                        'is_bold': False,      # Plain text doesn't have bold signals
+                        'run_size': 0,
+                        'num_id': 0,
+                        'num_lvl': 0
+                    })
+            self._h4_counters = {}
+            self._build_from_signals(raw_lines, doc)
+        else:
+            print(f"[DocumentProcessor] Detected HTML input (length: {len(html)}), using tag-based parser.")
+            processed_elements = set()
 
-        # ── FIX: pass doc explicitly into process_node ──
-        def process_node(node, container):
-            """
-            Recursive HTML walker that preserves formatting.
-            container: Can be a Document or a Paragraph object.
-            """
-            if node in processed_elements:
-                return
+            def process_node(node, container):
+                if node in processed_elements: return
+                if not getattr(node, 'name', None):
+                    clean_text = str(node).strip()
+                    if clean_text:
+                        if isinstance(container, Paragraph): container.add_run(clean_text)
+                        else: container.add_paragraph(clean_text)
+                    return
 
-            if not getattr(node, 'name', None):
-                # Text node
-                clean_text = str(node).strip()
-                if clean_text:
-                    if isinstance(container, Paragraph):
-                        container.add_run(clean_text)
-                    else:
-                        container.add_paragraph(clean_text)
-                return
-
-            # --- Block Elements ---
-            if node.name in ('h1', 'h2', 'h3', 'h4'):
-                level = int(node.name[1])
-                para = container.add_heading('', level=level)
-                for child in node.contents:
-                    process_node(child, para) # Pass the paragraph to continue run building
-                processed_elements.add(node)
-
-            elif node.name == 'p':
-                para = container.add_paragraph()
-                for child in node.contents:
-                    process_node(child, para)
-                processed_elements.add(node)
-
-            elif node.name == 'table':
-                self._add_html_table(container, node)
-                processed_elements.add(node)
-                # Tables handle their own children in _add_html_table
-
-            elif node.name in ('ul', 'ol'):
-                style = 'List Bullet' if node.name == 'ul' else 'List Number'
-                for li in node.find_all('li', recursive=False):
-                    para = container.add_paragraph(style=style)
-                    for child in li.contents:
-                        process_node(child, para)
-                processed_elements.add(node)
-
-            # --- Inline/Formatting Elements ---
-            elif node.name in ('b', 'strong', 'i', 'em', 'u', 'span'):
-                if isinstance(container, Paragraph):
-                    # We are already inside a paragraph, add a run and recurse
-                    run = container.add_run()
-                    if node.name in ('b', 'strong'): run.bold = True
-                    if node.name in ('i', 'em'): run.italic = True
-                    if node.name == 'u': run.underline = True
-                    
-                    # Process children into THIS run if they are simple text, 
-                    # else recurse to handle nested formatting like <b><i>...</i></b>
-                    for child in node.contents:
-                        if not getattr(child, 'name', None):
-                            run.text += str(child)
-                        else:
-                            process_node(child, container) 
-                else:
-                    # Formatting tag outside a paragraph — create a new paragraph
-                    para = container.add_paragraph()
-                    process_node(node, para)
-                processed_elements.add(node)
-
-            elif node.name == 'div':
-                block_children = node.find(['p', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'table', 'div'])
-                if not block_children:
-                    para = container.add_paragraph()
-                    for child in node.contents:
-                        process_node(child, para)
+                if node.name in ('h1', 'h2', 'h3', 'h4'):
+                    level = int(node.name[1])
+                    para = container.add_heading('', level=level)
+                    for child in node.contents: process_node(child, para)
                     processed_elements.add(node)
+                elif node.name == 'p':
+                    para = container.add_paragraph()
+                    for child in node.contents: process_node(child, para)
+                    processed_elements.add(node)
+                elif node.name == 'table':
+                    self._add_html_table(container, node)
+                    processed_elements.add(node)
+                elif node.name in ('ul', 'ol'):
+                    style = 'List Bullet' if node.name == 'ul' else 'List Number'
+                    for li in node.find_all('li', recursive=False):
+                        para = container.add_paragraph(style=style)
+                        for child in li.contents: process_node(child, para)
+                    processed_elements.add(node)
+                elif node.name in ('b', 'strong', 'i', 'em', 'u', 'span'):
+                    if isinstance(container, Paragraph):
+                        run = container.add_run()
+                        if node.name in ('b', 'strong'): run.bold = True
+                        if node.name in ('i', 'em'): run.italic = True
+                        if node.name == 'u': run.underline = True
+                        for child in node.contents:
+                            if not getattr(child, 'name', None): run.text += str(child)
+                            else: process_node(child, container)
+                    else:
+                        para = container.add_paragraph()
+                        process_node(node, para)
+                    processed_elements.add(node)
+                elif node.name == 'div':
+                    block_children = node.find(['p', 'h1', 'h2', 'h3', 'h4', 'ul', 'ol', 'table', 'div'])
+                    if not block_children:
+                        para = container.add_paragraph()
+                        for child in node.contents: process_node(child, para)
+                        processed_elements.add(node)
+                    else:
+                        for child in node.contents: process_node(child, container)
                 else:
-                    for child in node.contents:
-                        process_node(child, container)
-            else:
-                # Unknown tag — just recurse
-                for child in node.contents:
-                    process_node(child, container)
+                    for child in node.contents: process_node(child, container)
 
-        # ── Start recursion ──
-        for child in soup.contents:
-            process_node(child, doc)
+            for child in soup.contents:
+                process_node(child, doc)
 
         styled_doc = self.style_manager.apply_template_styles(doc)
         self._apply_final_features(styled_doc)
@@ -154,6 +145,101 @@ class DocumentProcessor:
 
         if self.include_toc:
             self.toc_manager.insert_toc(doc)
+
+    def _add_html_table(self, doc: Document, element):
+        """
+        Robust HTML table parser.
+        Handles nested tables, merged cells, and complex HTML structures.
+        """
+        try:
+            # Find the table element
+            table = element
+            
+            # Create Word table with estimated dimensions
+            rows = table.find_all('tr')
+            num_rows = len(rows)
+            
+            # Estimate columns by finding max cells in any row
+            num_cols = 0
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                num_cols = max(num_cols, len(cells))
+            
+            if num_rows == 0 or num_cols == 0:
+                return
+            
+            # Create Word table
+            word_table = doc.add_table(rows=num_rows, cols=num_cols)
+            word_table.style = 'Table Grid'
+            
+            # Process each row
+            for i, row in enumerate(rows):
+                cells = row.find_all(['td', 'th'])
+                
+                # Track merged cells
+                col_offset = 0
+                
+                for cell in cells:
+                    # Get cell text
+                    cell_text = ''.join(cell.get_text(separator=' ', strip=True))
+                    
+                    # Get cell attributes
+                    rowspan = int(cell.get('rowspan', 1))
+                    colspan = int(cell.get('colspan', 1))
+                    
+                    # Find the target cell in Word table
+                    target_row = i
+                    target_col = col_offset
+                    
+                    # Adjust for previous merged cells
+                    while target_row < num_rows and target_col < num_cols:
+                        if word_table.cell(target_row, target_col).text.strip() == '':
+                            break
+                        target_col += 1
+                    
+                    if target_row >= num_rows or target_col >= num_cols:
+                        continue
+                    
+                    # Merge cells if needed
+                    if rowspan > 1 or colspan > 1:
+                        word_table.cell(target_row, target_col).merge(
+                            word_table.cell(target_row + rowspan - 1, target_col + colspan - 1)
+                        )
+                    
+                    # Add content to cell
+                    word_cell = word_table.cell(target_row, target_col)
+                    word_cell.text = cell_text
+                    
+                    # Apply basic styling
+                    if cell.name == 'th':
+                        word_cell.paragraphs[0].runs[0].bold = True
+                        word_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    else:
+                        word_cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    
+                    # Move to next column
+                    col_offset += colspan
+                    
+        except Exception as e:
+            print(f"Error parsing HTML table: {e}")
+            # Fallback: add as plain text
+            doc.add_paragraph(str(element))
+    
+    def detect_structure(self, text):
+        lines = text.split('\n')
+        structured = []
+
+        for line in lines:
+            line = line.strip()
+
+            if re.match(r'^(\d+\.|\-|\*)\s+', line):
+                structured.append(('list', line))
+            elif len(line) < 60 and line.isupper():
+                structured.append(('heading', line))
+            else:
+                structured.append(('para', line))
+
+        return structured
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # DOCX PIPELINE
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -167,63 +253,71 @@ class DocumentProcessor:
         
         raw_lines = []
 
-        for p_el in source_doc.element.iter(f'{{{W}}}p'):
+        # ── STEP 1: EXTRACT (Preserving Order) ──────────────────────────
+        for elem in source_doc.element.body.iterchildren():
+            tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+            
+            if tag == 'p':
+                # Walk ancestor chain looking for Fallback tag
+                is_fallback = False
+                parent = elem.getparent()
+                while parent is not None:
+                    if (parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag) == 'Fallback':
+                        is_fallback = True; break
+                    parent = parent.getparent()
+                if is_fallback: continue
 
-            # Walk ancestor chain looking for Fallback tag
-            is_fallback = False
-            parent = p_el.getparent()
-            while parent is not None:
-                tag = parent.tag.split('}')[-1] if '}' in parent.tag else parent.tag
-                if tag == 'Fallback':
-                    is_fallback = True
-                    break
-                parent = parent.getparent()
-            if is_fallback:
-                continue
+                para       = Paragraph(elem, source_doc)
+                style_name = para.style.name if para.style else 'Normal'
+                
+                # Word list-numbering
+                pPr      = elem.find(qn('w:pPr'))
+                numPr    = pPr.find(qn('w:numPr'))   if pPr   is not None else None
+                numId_el = numPr.find(qn('w:numId')) if numPr is not None else None
+                ilvl_el  = numPr.find(qn('w:ilvl'))  if numPr is not None else None
+                num_id   = int(numId_el.get(qn('w:val'), 0)) if numId_el is not None else 0
+                num_lvl  = int(ilvl_el.get(qn('w:val'),  0)) if ilvl_el  is not None else 0
 
-            para       = Paragraph(p_el, source_doc)
-            style_name = para.style.name if para.style else 'Normal'
+                # Run-level signals: bold and size
+                run_sizes, is_bold = [], False
+                for r in elem.findall(qn('w:r')):
+                    rPr = r.find(qn('w:rPr'))
+                    if rPr is not None:
+                        sz = rPr.find(qn('w:sz'))
+                        if sz is not None:
+                            try: run_sizes.append(int(sz.get(qn('w:val'))))
+                            except: pass
+                        if rPr.find(qn('w:b')) is not None: is_bold = True
+                run_size = max(run_sizes) if run_sizes else 0
 
-            # Word list-numbering: numId > 0 means this paragraph is part of
-            # an auto-numbered list. The visible number is generated by Word's
-            # engine — it is NOT stored in the text content.
-            pPr      = p_el.find(qn('w:pPr'))
-            numPr    = pPr.find(qn('w:numPr'))   if pPr   is not None else None
-            numId_el = numPr.find(qn('w:numId')) if numPr is not None else None
-            ilvl_el  = numPr.find(qn('w:ilvl'))  if numPr is not None else None
-            num_id   = int(numId_el.get(qn('w:val'), 0)) if numId_el is not None else 0
-            num_lvl  = int(ilvl_el.get(qn('w:val'),  0)) if ilvl_el  is not None else 0
-
-            # Run-level signals: bold and explicit font size
-            run_sizes, is_bold = [], False
-            for r in p_el.findall(qn('w:r')):
-                rPr = r.find(qn('w:rPr'))
-                if rPr is not None:
-                    sz = rPr.find(qn('w:sz'))
-                    if sz is not None:
-                        try: run_sizes.append(int(sz.get(qn('w:val'))))
-                        except: pass
-                    if rPr.find(qn('w:b')) is not None:
-                        is_bold = True
-            run_size = max(run_sizes) if run_sizes else 0
-
-            text_full = para.text.strip()
-            if not text_full:
-                continue
-
-            # Soft line-breaks (\v / \n) inside one paragraph → split into separate lines
-            lines = text_full.split('\n') if '\n' in text_full else [text_full]
-            for line in lines:
-                line = line.strip()
-                if line:
+                text_full = para.text.strip()
+                if text_full:
                     raw_lines.append({
-                        'text':    line,
-                        'style':   style_name,
-                        'is_bold': is_bold,
-                        'run_size': run_size,
-                        'num_id':  num_id,
-                        'num_lvl': num_lvl,
+                        'type': 'text', 'text': text_full, 'style': style_name,
+                        'is_bold': is_bold, 'run_size': run_size,
+                        'num_id': num_id, 'num_lvl': num_lvl
                     })
+
+            elif tag == 'tbl':
+                # Convert table to HTML for chat preview
+                table_html = "<table>"
+                for row in elem.findall(qn('w:tr')):
+                    table_html += "<tr>"
+                    for cell in row.findall(qn('w:tc')):
+                        # Get all text from all paragraphs in the cell
+                        cell_text = ""
+                        for p in cell.findall(qn('w:p')):
+                            for r in p.findall(qn('w:r')):
+                                t = r.find(qn('w:t'))
+                                if t is not None: cell_text += t.text
+                            cell_text += " "
+                        table_html += f"<td>{cell_text.strip()}</td>"
+                    table_html += "</tr>"
+                table_html += "</table>"
+
+                raw_lines.append({
+                    'type': 'table', 'node': elem, 'text': table_html
+                })
 
         # ── STEP 2: JOIN ─────────────────────────────────────────────────
         # Word COM PDF→DOCX conversion fragments numbered items across paragraphs:
@@ -309,135 +403,68 @@ class DocumentProcessor:
 
         raw_lines = joined
 
-        # ── STEP 3: CLASSIFY + BUILD ──────────────────────────────────────
+        # ── STEPS 3 & 4: CLASSIFY + BUILD ──────────────────────────────────
+        self._build_from_signals(raw_lines, new_doc)
+
+        branded_doc = self.style_manager.apply_template_styles(new_doc)
+        self._apply_final_features(branded_doc)
         
+        branded_doc.save(out)
+        return {'success': True, 'paragraphs': len(new_doc.paragraphs)}
+
+    def _build_from_signals(self, raw_lines, doc):
+        """Standard processing logic shared by initial files and text edits."""
         expecting_list = False
+        is_first_non_empty = True
 
         for item in raw_lines:
-            text     = item['text'].replace('Ł', '').strip()
-            style    = item['style']
-            is_bold  = item['is_bold']
-            run_size = item['run_size']
-            num_id   = item['num_id']
-            num_lvl  = item['num_lvl']
-            is_numbered_list_item = num_id > 0
-
-            if not text:
+            if item.get('type') == 'table':
+                # RESTORE TABLE PROCESSING
+                from docx.table import Table
+                new_tbl = Table(item['node'], doc)
+                doc.element.body.append(new_tbl._element)
                 continue
 
-            # Structural pattern signals — zero keywords, work for any language/domain
+            text     = item['text'].replace('Ł', '').strip()
+            style    = item.get('style', 'Normal')
+            is_bold  = item.get('is_bold', False)
+            run_size = item.get('run_size', 0)
+            num_id   = item.get('num_id', 0)
+            num_lvl  = item.get('num_lvl', 0)
+            is_numbered_list_item = num_id > 0
+
+            if not text: continue
+            
+            # Signals
             is_section_label    = text.endswith(':') and len(text.split()) <= 6
             is_numbered_heading = bool(re.match(r'^\d+[\.\)]\s+[A-Z]', text))
             is_explicit_bullet  = text.startswith(('☐', '☑', '•', '▪', '►', '■', '□'))
             is_dash_bullet      = bool(re.match(r'^[-–]\s+\S', text))
 
-            # Update list context state
-            if text.endswith('.') and len(text) > 80:
-                expecting_list = False
-            if is_section_label:
-                expecting_list = True
+            # --- Title Promotion ---
+            if is_first_non_empty and len(text.split()) <= 15 and not text.endswith('.'):
+                doc.add_heading(text, level=1)
+                is_first_non_empty = False
+                continue
 
-            # ── H1 ───────────────────────────────────────────────────────
-            # Word COM reliably preserves Heading 1 style name only
-            if 'Heading 1' in style:
-                new_doc.add_heading(text, level=1)
-                expecting_list = False
+            is_first_non_empty = False
 
-            # ── H2 ───────────────────────────────────────────────────────
-            
-            elif (
-                'Heading 2' in style
-                or run_size >= 26
-                or (is_bold and run_size >= 22 and len(text.split()) <= 10)
-                or (is_bold and not is_section_label and len(text.split()) <= 8
-                    and not text.endswith('.'))
-                or re.match(r'^[A-Z][a-z]+\s+[\d][\d\-\+\.]*\s*:', text)
-            ):
-                new_doc.add_heading(text, level=2)
-                expecting_list = False
-
-            # ── H3 ───────────────────────────────────────────────────────
-            # Section labels ("Tasks:", "Deliverables:") and short bold lines
-            elif (
-                'Heading 3' in style
-                or is_section_label
-                or (is_bold and len(text.split()) <= 6)
-            ):
-                new_doc.add_heading(text, level=3)
-                expecting_list = True if is_section_label else False
-
-            # ── H4 ───────────────────────────────────────────────────────
-            # numId signal = Word auto-numbered list item ("1. Kickoff Meeting")
-            # Short numbered heading = text already contains number ("2. UI/UX")
-            # Guard: long text (>6 words) stays as a bullet — it's a step, not a title
-            elif (
-                (is_numbered_list_item and num_lvl == 0)
-                or (is_numbered_heading and len(text.split()) <= 6)
-            ):
-                if is_numbered_list_item:
-                    # Number is NOT in the text — Word generates it via numId.
-                    # We reconstruct it manually so it appears in the output.
-                    self._h4_counters[num_id] = self._h4_counters.get(num_id, 0) + 1
-                    display_text = f"{self._h4_counters[num_id]}. {text}"
-                else:
-                    # Number already present in text (e.g. "2. UI/UX Requirements")
-                    display_text = text
-                new_doc.add_heading(display_text, level=4)
-                expecting_list = True
-
-            # ── BULLETS ──────────────────────────────────────────────────
+            # --- Classifier logic (H1-H4) ---
+            if 'Heading 1' in style: doc.add_heading(text, level=1)
+            elif 'Heading 2' in style or is_numbered_heading or run_size >= 26 or (is_bold and run_size >= 22):
+                doc.add_heading(text, level=2)
+            elif 'Heading 3' in style or is_section_label or (is_bold and len(text.split()) <= 8):
+                doc.add_heading(text, level=3)
+            elif is_numbered_list_item and num_lvl == 0:
+                self._h4_counters[num_id] = self._h4_counters.get(num_id, 0) + 1
+                doc.add_heading(f"{self._h4_counters[num_id]}. {text}", level=4)
             elif is_explicit_bullet or is_dash_bullet or expecting_list:
                 clean = re.sub(r'^[-–☐☑•▪►■□]\s*', '', text).strip().rstrip('-').strip()
-                if not clean:
-                    continue
-
-                # Code-style label heading: "FR-001: title" or "UC-01: description"
-                # Detect by digit/hyphen in label — avoids promoting generic fields
-                # like "Description:" or "User Role:" which have no digit/hyphen
-                colon_pos = clean.find(':')
-                label     = clean[:colon_pos] if colon_pos > 0 else ''
-                is_label_heading = (
-                    colon_pos > 0
-                    and len(label.split()) <= 2
-                    and not clean.endswith(':')
-                    and len(clean) > colon_pos + 2
-                    and not expecting_list
-                    and re.search(r'[\d\-]', label)
-                )
-
-                if is_label_heading:
-                    new_doc.add_heading(clean, level=3)
-                else:
-                    # Split crammed items — only when clearly 3+ distinct items (2+ words each)
-                    # e.g. "Stakeholder map Interview schedule Project doc" → 3 bullets
-                    items = re.split(r'(?<=[a-z\)\d])\s+(?=[A-Z][a-z])', clean)
-                    items = [it.strip() for it in items if it.strip()]
-                    if len(items) >= 3 and all(len(it.split()) >= 2 for it in items):
-                        for it in items:
-                            it_clean = re.sub(r'^[-☐•▪]\s*', '', it).strip()
-                            if it_clean:
-                                try:    p = new_doc.add_paragraph(style='List Bullet')
-                                except: p = new_doc.add_paragraph()
-                                p.add_run(it_clean)
-                    else:
-                        try:    p = new_doc.add_paragraph(style='List Bullet')
-                        except: p = new_doc.add_paragraph()
-                        p.add_run(clean)
-
-            # ── BODY ─────────────────────────────────────────────────────
+                if clean:
+                    try: doc.add_paragraph(clean, style='List Bullet')
+                    except: doc.add_paragraph(clean)
             else:
-                new_doc.add_paragraph(text)
-
-        # ── STEP 4: BRAND ────────────────────────────────────────────────
-        branded_doc = self.style_manager.apply_template_styles(new_doc)
-        
-        # Apply optional features
-        self._apply_final_features(branded_doc)
-        
-        branded_doc.save(out)
-        import time
-        time.sleep(1)
-        return {'success': True, 'paragraphs': len(new_doc.paragraphs)}
+                doc.add_paragraph(text)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # PDF PIPELINE
@@ -506,22 +533,3 @@ class DocumentProcessor:
         return doc
 
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # HTML TABLE HELPER
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-    def _add_html_table(self, doc: Document, element):
-        """Convert a BeautifulSoup <table> element into a Word table."""
-        rows = element.find_all('tr')
-        if not rows:
-            return
-        cols = max(len(r.find_all(['td', 'th'])) for r in rows)
-        if not cols:
-            return
-        table = doc.add_table(rows=len(rows), cols=cols)
-        try:    table.style = 'Table Grid'
-        except Exception: pass
-        for i, row in enumerate(rows):
-            for j, cell in enumerate(row.find_all(['td', 'th'])):
-                if j < cols:
-                    table.rows[i].cells[j].text = cell.get_text(separator=' ').strip()

@@ -2,11 +2,17 @@
 StyleManager 
 """
 
+import hashlib
 from docx import Document
 from docx.oxml.ns import qn
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from copy import deepcopy
+
+
+def get_image_hash(blob):
+    """Generate MD5 hash for a binary blob (image)."""
+    return hashlib.md5(blob).hexdigest()
 
 
 # Relationship namespace
@@ -41,8 +47,8 @@ class StyleManager:
         self._brand_body_paragraphs(doc)
         self._apply_page_layout_rules(doc)
         self._apply_heading_indents(doc)
-        # self._add_page_number(doc)   # must run BEFORE _copy_header_footer
-        # self._copy_header_footer(doc)
+        self._add_page_number(doc)
+        self._copy_header_footer(doc)
        
 
         print('[StyleManager] ✓ Done')
@@ -215,7 +221,7 @@ class StyleManager:
             section.footer.is_linked_to_previous = False
             self._deep_copy_hdr_ftr(template_section.header, section.header)
             self._deep_copy_hdr_ftr(template_section.footer, section.footer)
-        # self._fix_duplicate_media(doc)
+        self._fix_duplicate_media(doc)
             
     def _add_page_number(self, doc: Document):
         
@@ -323,9 +329,7 @@ class StyleManager:
                     for e in rPr.findall(qn('w:szCs')):
                         rPr.remove(e)
                 else:
-                    # BODY TEXT: force to BODY_SIZE, remove bold
-                    for e in rPr.findall(qn('w:b')):
-                        rPr.remove(e)
+                    # BODY TEXT: force to BODY_SIZE
                     for e in rPr.findall(qn('w:sz')):
                         rPr.remove(e)
                     for e in rPr.findall(qn('w:szCs')):
@@ -397,10 +401,42 @@ class StyleManager:
             print("    ✓ Document is now editable")
         except Exception as e:
             print(f"    ⚠ Error: {e}")
-    
+            
+    def _fix_duplicate_media(self, doc: Document):
+        """Scan document parts and relationships to find duplicate media entries."""
+        print("  [StyleManager] Deduplicating media...")
+        try:
+            pkg = doc.part.package
+            media_parts = {}  # md5_hash -> part
+
+            # 1. Collect unique media parts
+            for part in list(pkg.parts):
+                if 'media/' in part.partname:
+                    h = get_image_hash(part.blob)
+
+                    if h not in media_parts:
+                        media_parts[h] = part
+
+            # 2. Remap duplicate relationships
+            for part in list(pkg.parts):
+                if not hasattr(part, 'rels'):
+                    continue
+
+                for rel in part.rels.values():
+                    if 'image' in rel.reltype:
+                        target_h = get_image_hash(rel.target_part.blob)
+
+                        if target_h in media_parts:
+                            canonical_part = media_parts[target_h]
+
+                            if rel.target_part != canonical_part:
+                                # Remap to canonical image
+                                rel._target = canonical_part
+
+        except Exception as e:
+            print(f"  [StyleManager] Media deduplication warning: {e}")
 
 def _remap_rids(element, rId_map: dict):
-    
     for attr_key in list(element.attrib.keys()):
         local = attr_key.split('}')[-1] if '}' in attr_key else attr_key
         ns    = attr_key.split('}')[0].lstrip('{') if '}' in attr_key else ''
