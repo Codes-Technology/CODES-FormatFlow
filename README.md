@@ -23,8 +23,13 @@ FormatFlow is a professional-grade document processing and generation platform d
 
 1.  **Clone the repository**:
     ```bash
+<<<<<<< HEAD
     git clone https:/github.com/Codes-Technology/CODES-FormatFlow
     cd CODES-FormatFlow
+=======
+    git clone https:/github.com/Codes-Technology/CODES-FormatFlow.git
+    cd formatflow
+>>>>>>> 87365493d1c843efe75cb523795410e843172309
     ```
 
 2.  **Environment Configuration**:
