@@ -7,9 +7,16 @@ from datetime import datetime
 from werkzeug.utils import secure_filename
 from flask import Blueprint, request, jsonify, send_file
 from utils.decorators import require_auth
-from utils.db_manager import db, ProcessingJob, ProcessingJobHistory, JobType, JobStatus
+from utils.db_manager import (
+    db,
+    ProcessingJob,
+    ProcessingJobHistory,
+    JobType,
+    JobStatus,
+)
+from utils.file_storage import FileStorageManager
 from document_processor import DocumentProcessor
-from config import TEMPLATE_DOCX
+from config import TEMPLATE_DOCX, ALLOWED_EXTENSIONS, MAX_FILE_SIZE, STORAGE_DIR
 from io import BytesIO
 import pythoncom
 from docx2pdf import convert
@@ -31,7 +38,74 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _read_best_available_file(history, file_kind='output'):
+    if file_kind == 'upload':
+        preferred_path = history.UploadFileServerPath
+        preferred_data = history.UploadFileData
+        preferred_name = history.UploadFileName
+        path_attr = 'UploadFileServerPath'
+        data_attr = 'UploadFileData'
+        name_attr = 'UploadFileName'
+    else:
+        preferred_path = history.OutputFileServerPath
+        preferred_data = history.OutputFileData
+        preferred_name = history.OutputFileName
+        path_attr = 'OutputFileServerPath'
+        data_attr = 'OutputFileData'
+        name_attr = 'OutputFileName'
+
+    try:
+        return file_storage_manager.retrieve_file(
+            preferred_path, preferred_data, preferred_name
+        ).getvalue(), preferred_name
+    except FileNotFoundError:
+        pass
+
+    if preferred_name:
+        candidates = ProcessingJobHistory.query.filter(
+            getattr(ProcessingJobHistory, name_attr) == preferred_name
+        ).order_by(ProcessingJobHistory.CreatedDate.desc()).all()
+
+        for candidate in candidates:
+            candidate_path = getattr(candidate, path_attr)
+            candidate_data = getattr(candidate, data_attr)
+            try:
+                return file_storage_manager.retrieve_file(
+                    candidate_path, candidate_data, preferred_name
+                ).getvalue(), preferred_name
+            except FileNotFoundError:
+                continue
+
+    return None, preferred_name
+
+
+def _is_allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _coerce_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {'true', '1', 'yes', 'on'}
+    return bool(value)
+
+def get_first_sentence(text):
+    """Fallback if Groq title fails: extract first sentence or first 50 chars."""
+    if not text: return "New Chat"
+    clean = clean_html(text).strip()
+    if not clean: return "New Chat"
+    
+    # Try to find first sentence boundary
+    match = re.split(r'[.!?\n]', clean)
+    first = match[0].strip() if match else clean[:50]
+    return first[:60] if first else "New Chat"
+
 process_bp = Blueprint('process', __name__)
+file_storage_manager = FileStorageManager(STORAGE_DIR)
 
 
 # ==============================
@@ -47,7 +121,6 @@ def generate_title(text):
         if not api_key:
             logger.warning("GROQ_API key not found, skipping smart title")
             raise ValueError("Missing API Key")
-
         clean_prompt = clean_html(text)[:1000]
         if not clean_prompt:
             return "New Chat"
@@ -82,8 +155,9 @@ def generate_title(text):
 # ==============================
 def generate_unique_filename(base_name, current_user):
     clean_name = normalize_filename(base_name)
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
-    filename_base = f"{clean_name}_{timestamp}"
+    # Compact timestamp: No gaps, includes seconds
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    filename_base = f"CODES_{clean_name}_{timestamp}"
     filename = f"{filename_base}.docx"
 
     counter = 1
@@ -110,8 +184,8 @@ def process_text(current_user):
 
         user_font = data.get('fontFamily', 'Calibri')
         user_size = int(data.get('fontSize', 11))
-        include_cover = data.get('includeCover', False)
-        include_toc = data.get('includeTOC', False)
+        include_cover = _coerce_bool(data.get('includeCover', False))
+        include_toc = _coerce_bool(data.get('includeTOC', False))
 
         processor = DocumentProcessor(
             template_path=TEMPLATE_DOCX,
@@ -123,12 +197,23 @@ def process_text(current_user):
 
         doc_obj = processor.html_to_docx(text_input)
 
-        output_buffer = BytesIO()
-        doc_obj.save(output_buffer)
-        output_buffer.seek(0)
-        final_file_data = output_buffer.read()
+        if include_toc:
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp_doc:
+                temp_docx_path = tmp_doc.name
+            try:
+                doc_obj.save(temp_docx_path)
+                processor.refresh_saved_docx(temp_docx_path)
+                with open(temp_docx_path, 'rb') as f:
+                    final_file_data = f.read()
+            finally:
+                if os.path.exists(temp_docx_path):
+                    os.remove(temp_docx_path)
+        else:
+            output_buffer = BytesIO()
+            doc_obj.save(output_buffer)
+            output_buffer.seek(0)
+            final_file_data = output_buffer.read()
 
-        full_text_summary = clean_html(text_input)
         job_id = data.get('jobId', None)
 
         # Job handling
@@ -142,24 +227,38 @@ def process_text(current_user):
             db.session.add(job)
             db.session.flush()
 
-        filename = generate_unique_filename(job.JobName, current_user)
+        # Generate an output file name based on the actual text input, not the chat's title
+        if job_id:
+            file_base_name = get_first_sentence(text_input)
+        else:
+            file_base_name = job_name
+            
+        filename = generate_unique_filename(file_base_name, current_user)
+
+        processing_time = round(time.time() - start_time, 2)
+        stored_output = file_storage_manager.save_file(
+            final_file_data, filename, current_user.Id, job.Id
+        )
 
         history = ProcessingJobHistory(
             ProcessJobId=job.Id,
             JobType=JobType.TEXT,
-            Summary=full_text_summary,
+            ProcessingTime=processing_time,
             UploadFileData=text_input.encode('utf-8'),
             Status=JobStatus.SUCCESS,
-            OutputFileData=final_file_data,
+            OutputFileData=stored_output['db_bytes'],
+            OutputFileServerPath=stored_output['server_path'],
             OutputFileName=filename,
             FontFamily=user_font,
-            FontSize=user_size
+            FontSize=user_size,
+            IncludeCover=include_cover,
+            IncludeTOC=include_toc,
+            CreatedBy=current_user.Id,
+            ModifiedBy=current_user.Id
         )
 
         db.session.add(history)
         db.session.commit()
-
-        processing_time = round(time.time() - start_time, 2)
         processing_count = history.ProcessingCount
 
         return jsonify({
@@ -174,8 +273,7 @@ def process_text(current_user):
 
     except Exception as e:
         db.session.rollback()
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in process_text: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -187,17 +285,22 @@ def process_text(current_user):
 def process_file(current_user):
     try:
         start_time = time.time()
+        if request.content_length and request.content_length > MAX_FILE_SIZE:
+            return jsonify({'success': False, 'error': 'File exceeds maximum allowed size'}), 400
+
         if 'file' not in request.files:
             return jsonify({'success': False, 'error': 'No file uploaded'})
 
         file = request.files['file']
         if file.filename == '':
             return jsonify({'success': False, 'error': 'No file selected'})
+        if not _is_allowed_file(file.filename):
+            return jsonify({'success': False, 'error': 'Unsupported file type'}), 400
 
         user_font = request.form.get('fontFamily', 'Calibri')
         user_size = int(request.form.get('fontSize', 11))
-        include_cover = request.form.get('includeCover') == 'true'
-        include_toc = request.form.get('includeTOC') == 'true'
+        include_cover = _coerce_bool(request.form.get('includeCover'))
+        include_toc = _coerce_bool(request.form.get('includeTOC'))
         job_id = request.form.get('jobId', None)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -219,11 +322,11 @@ def process_file(current_user):
             if not result.get('success', False):
                 return jsonify({'success': False, 'error': result.get('error')}), 500
 
-            with open(output_path, 'rb') as f:
-                final_file_data = f.read()
-
             with open(input_path, 'rb') as f:
                 original_file_data = f.read()
+
+            with open(output_path, 'rb') as f:
+                final_file_data = f.read()
 
         # Job handling
         if job_id and job_id != 'null':
@@ -238,24 +341,37 @@ def process_file(current_user):
 
         base_name = os.path.splitext(file.filename)[0]
         filename = generate_unique_filename(base_name, current_user)
+        processing_time = round(time.time() - start_time, 2)
+
+        stored_upload = file_storage_manager.save_file(
+            original_file_data, secure_filename(file.filename), current_user.Id, job.Id
+        )
+        stored_output = file_storage_manager.save_file(
+            final_file_data, filename, current_user.Id, job.Id
+        )
 
         history = ProcessingJobHistory(
             ProcessJobId=job.Id,
             JobType=JobType.FILE,
-            Summary=file.filename,
-            UploadFileName=file.filename,
-            UploadFileData=original_file_data,
-            Status=JobStatus.SUCCESS,
-            OutputFileData=final_file_data,
+            UploadFileName=secure_filename(file.filename),
+            UploadFileData=stored_upload['db_bytes'],
+            UploadFileServerPath=stored_upload['server_path'],
             OutputFileName=filename,
+            OutputFileData=stored_output['db_bytes'],
+            OutputFileServerPath=stored_output['server_path'],
+            ProcessingTime=processing_time,
             FontFamily=user_font,
-            FontSize=user_size
+            FontSize=user_size,
+            IncludeCover=include_cover,
+            IncludeTOC=include_toc,
+            Status=JobStatus.SUCCESS,
+            CreatedBy=current_user.Id,
+            ModifiedBy=current_user.Id
         )
 
         db.session.add(history)
         db.session.commit()
 
-        processing_time = round(time.time() - start_time, 2)
         processing_count = history.ProcessingCount
 
         return jsonify({
@@ -270,8 +386,7 @@ def process_file(current_user):
 
     except Exception as e:
         db.session.rollback()
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in process_file: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 
@@ -339,8 +454,7 @@ def get_conversations(current_user):
             "IsFavorite": job.IsFavorite
         } for job in jobs]), 200
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in get_conversations: {e}", exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
 
 @process_bp.route('/favorite/<int:job_id>', methods=['POST'])
@@ -369,48 +483,82 @@ def edit_text(current_user, history_id):
     try:
         start_time = time.time()
         data = request.json
-        new_text = data.get('text', '')
         
-        # 1. Fetch the existing history record
+        # 1. Fetch the existing history record first so we have defaults
         original_history = ProcessingJobHistory.query.get_or_404(history_id)
         job = ProcessingJob.query.get(original_history.ProcessJobId)
 
         if job.UserId != current_user.Id:
             return jsonify({'success': False, 'error': 'Unauthorized'}), 403
 
-        # 2. Re-run the DocumentProcessor with new text
+        # 2. Now extract new settings if provided, else keep originals
+        new_text = data.get('text', '')
+        font_family = data.get('fontFamily', original_history.FontFamily)
+        font_size = int(data.get('fontSize', original_history.FontSize))
+        include_cover = _coerce_bool(data.get('includeCover'), original_history.IncludeCover)
+        include_toc = _coerce_bool(data.get('includeTOC'), original_history.IncludeTOC)
+
+        # 3. Re-run the DocumentProcessor with new settings
         processor = DocumentProcessor(
             template_path=TEMPLATE_DOCX,
-            font_family=original_history.FontFamily,
-            font_size=original_history.FontSize,
-            include_cover=False, # Or pull from job settings
-            include_toc=False
+            font_family=font_family,
+            font_size=font_size,
+            include_cover=include_cover,
+            include_toc=include_toc
         )
 
         doc_obj = processor.html_to_docx(new_text)
-        
-        output_buffer = BytesIO()
-        doc_obj.save(output_buffer)
-        output_buffer.seek(0)
-        final_file_data = output_buffer.read()
+
+        if include_toc:
+            with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp_doc:
+                temp_docx_path = tmp_doc.name
+            try:
+                doc_obj.save(temp_docx_path)
+                processor.refresh_saved_docx(temp_docx_path)
+                with open(temp_docx_path, 'rb') as f:
+                    final_file_data = f.read()
+            finally:
+                if os.path.exists(temp_docx_path):
+                    os.remove(temp_docx_path)
+        else:
+            output_buffer = BytesIO()
+            doc_obj.save(output_buffer)
+            output_buffer.seek(0)
+            final_file_data = output_buffer.read()
 
         # 3. Create a NEW history entry (to keep the "chat" thread intact)
         new_count = original_history.ProcessingCount + 1
         
-        # NEW: Generate a descriptive filename for the edited version
-        new_filename = generate_unique_filename(job.JobName, current_user)
+        # 🟢 INCREMENT ORIGINAL History Item's Count as well
+        original_history.ProcessingCount = new_count
+        original_history.ModifiedBy = current_user.Id
+        db.session.add(original_history)
+        
+        # Generate a descriptive filename based on the edited text
+        file_base_name = get_first_sentence(new_text)
+        new_filename = generate_unique_filename(file_base_name, current_user)
+        processing_time = round(time.time() - start_time, 2)
+
+        stored_output = file_storage_manager.save_file(
+            final_file_data, new_filename, current_user.Id, job.Id
+        )
 
         new_history = ProcessingJobHistory(
             ProcessJobId=job.Id,
             JobType=JobType.TEXT,
-            Summary=re.sub('<[^<]+?>', '', new_text)[:100],
+            ProcessingTime=processing_time,
             UploadFileData=new_text.encode('utf-8'),
             Status=JobStatus.SUCCESS,
-            OutputFileData=final_file_data,
+            OutputFileData=stored_output['db_bytes'],
+            OutputFileServerPath=stored_output['server_path'],
             OutputFileName=new_filename,
-            FontFamily=original_history.FontFamily,
-            FontSize=original_history.FontSize,
-            ProcessingCount=new_count
+            FontFamily=font_family,
+            FontSize=font_size,
+            IncludeCover=include_cover,
+            IncludeTOC=include_toc,
+            ProcessingCount=new_count,
+            CreatedBy=current_user.Id,
+            ModifiedBy=current_user.Id
         )
 
         db.session.add(new_history)
@@ -450,8 +598,7 @@ def get_conversation(current_user, job_id):
         return jsonify([h.to_dict(include_file_data=True) for h in histories]), 200
         
     except Exception as e:
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error in get_conversation: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
 
 # ==============================
@@ -463,24 +610,19 @@ def download_file(current_user, history_id):
     try:
         history = ProcessingJobHistory.query.get_or_404(history_id)
         job = ProcessingJob.query.get(history.ProcessJobId)
-
         if job.UserId != current_user.Id:
-            return jsonify({'success': False, 'error': 'Unauthorized access'}), 403
+            return jsonify({'success': False, 'error': 'Unauthorized'}), 403
+
+        try:
+            file_buffer = file_storage_manager.retrieve_file(
+                history.OutputFileServerPath,
+                history.OutputFileData,
+                history.OutputFileName
+            )
+        except FileNotFoundError as e:
+            return jsonify({'success': False, 'error': str(e)}), 404
 
         requested_format = request.args.get('format', 'docx').lower()
-
-        # NEW: Construct a descriptive download name based on the CURRENT job title
-        job_name_clean = normalize_filename(job.JobName)
-        # We reuse the same timestamping/count logic if needed, or just the current title
-        # history.OutputFileName contains a timestamp by default; we replace the prefix
-        old_ext = os.path.splitext(history.OutputFileName)[1]
-        timestamp = ""
-        # Extract timestamp if possible (e.g., Title_2026-04-01_11-43.docx)
-        match = re.search(r'_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}', history.OutputFileName)
-        if match:
-             timestamp = match.group(0)
-             
-        final_download_name = f"{job_name_clean}{timestamp}{old_ext}"
 
         if requested_format == 'pdf':
             pythoncom.CoInitialize()
@@ -490,7 +632,7 @@ def download_file(current_user, history_id):
             try:
                 docx_fd, docx_path = tempfile.mkstemp(suffix='.docx')
                 with os.fdopen(docx_fd, 'wb') as f:
-                    f.write(history.OutputFileData)
+                    f.write(file_buffer.read())
 
                 pdf_fd, pdf_path = tempfile.mkstemp(suffix='.pdf')
                 os.close(pdf_fd)
@@ -504,7 +646,7 @@ def download_file(current_user, history_id):
                     BytesIO(pdf_data),
                     mimetype='application/pdf',
                     as_attachment=True,
-                    download_name=final_download_name.replace(old_ext, '.pdf')
+                    download_name=history.OutputFileName.replace('.docx', '.pdf')
                 )
 
             finally:
@@ -514,13 +656,13 @@ def download_file(current_user, history_id):
 
         else:
             return send_file(
-                BytesIO(history.OutputFileData),
+                file_buffer,
                 mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                 as_attachment=True,
-                download_name=final_download_name
+                download_name=history.OutputFileName
             )
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return jsonify({'success': False, 'error': f'Download failed: {str(e)}'}), 500

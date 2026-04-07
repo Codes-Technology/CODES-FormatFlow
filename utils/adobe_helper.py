@@ -1,6 +1,8 @@
 import os
 import zipfile
 import json
+import tempfile
+import logging
 
 # Official Adobe v4+ Imports
 from adobe.pdfservices.operation.auth.service_principal_credentials import ServicePrincipalCredentials
@@ -11,12 +13,15 @@ from adobe.pdfservices.operation.pdfjobs.params.extract_pdf.extract_element_type
 from adobe.pdfservices.operation.pdfjobs.jobs.extract_pdf_job import ExtractPDFJob
 from adobe.pdfservices.operation.pdfjobs.result.extract_pdf_result import ExtractPDFResult
 
+logger = logging.getLogger(__name__)
+
 def adobe_pdf_extract(pdf_path, client_id, client_secret):
     """
     Extracts semantic JSON using the official Adobe PDF Services SDK (v4+).
     Bypasses manual token handling to prevent 'access_token' errors.
     """
-    print(f"[Adobe SDK] Starting extraction for: {pdf_path}")
+    logger.info("[Adobe SDK] Starting extraction for: %s", pdf_path)
+    temp_zip_path = None
     
     try:
         # 1. Setup credentials using your .env keys
@@ -50,7 +55,7 @@ def adobe_pdf_extract(pdf_path, client_id, client_secret):
         )
 
         # 7. Submit the job and let the SDK handle the polling automatically
-        print("[Adobe SDK] Uploading and processing (this takes a few seconds)...")
+        logger.info("[Adobe SDK] Uploading and processing (this takes a few seconds)...")
         location = pdf_services.submit(extract_pdf_job)
         pdf_services_response = pdf_services.get_job_result(location, ExtractPDFResult)
 
@@ -58,8 +63,8 @@ def adobe_pdf_extract(pdf_path, client_id, client_secret):
         result_asset = pdf_services_response.get_result().get_resource()
         stream_asset = pdf_services.get_content(result_asset)
 
-        temp_zip_path = pdf_path + "_extracted.zip"
-        with open(temp_zip_path, "wb") as file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix="_adobe_extract.zip") as file:
+            temp_zip_path = file.name
             file.write(stream_asset.get_input_stream())
 
         # 9. Unzip in memory and read the structured JSON
@@ -71,9 +76,12 @@ def adobe_pdf_extract(pdf_path, client_id, client_secret):
         if os.path.exists(temp_zip_path):
             os.remove(temp_zip_path)
 
-        print("[Adobe SDK] Extraction successful!")
+        logger.info("[Adobe SDK] Extraction successful")
         return data['elements']
 
     except Exception as e:
-        print(f"[Adobe SDK Error] {str(e)}")
+        logger.error("[Adobe SDK Error] %s", str(e))
         raise Exception(f"Official Adobe SDK Extraction Failed: {str(e)}")
+    finally:
+        if temp_zip_path and os.path.exists(temp_zip_path):
+            os.remove(temp_zip_path)

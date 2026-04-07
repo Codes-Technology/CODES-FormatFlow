@@ -6,7 +6,12 @@ from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.dialects.mysql import LONGBLOB
+from sqlalchemy import inspect, text
 from enum import Enum
+import logging
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 db = SQLAlchemy()
 
@@ -22,6 +27,45 @@ class JobStatus(str, Enum):
     FAILED = 'Failed'
 
 # MODELS
+class Settings(db.Model):
+    """System settings for configuration."""
+    __tablename__ = 'Settings'
+
+    VariableName = db.Column(db.String(100), primary_key=True, nullable=False)
+    VariableValue = db.Column(db.String(255), nullable=False)
+    Description = db.Column(db.Text, nullable=False)
+
+    @staticmethod
+    def get_upload_mode():
+        """Get current file upload mode."""
+        setting = Settings.query.filter_by(VariableName='UPLOAD_FILE_MODE').first()
+        if not setting or not setting.VariableValue:
+            return 'BOTH'
+
+        value = setting.VariableValue.strip().upper()
+        return value if value in {'FILE', 'DB', 'BOTH'} else 'BOTH'
+
+    @staticmethod
+    def set_upload_mode(mode):
+        """Update upload mode (FILE, DB, or BOTH)."""
+        normalized_mode = (mode or '').strip().upper()
+        if normalized_mode not in {'FILE', 'DB', 'BOTH'}:
+            raise ValueError("Mode must be FILE, DB, or BOTH")
+
+        setting = Settings.query.filter_by(VariableName='UPLOAD_FILE_MODE').first()
+        if setting:
+            setting.VariableValue = normalized_mode
+        else:
+            setting = Settings(
+                VariableName='UPLOAD_FILE_MODE',
+                VariableValue=normalized_mode,
+                Description='Controls where uploaded files are stored.'
+            )
+            db.session.add(setting)
+
+        db.session.commit()
+
+
 class User(db.Model):
     """User accounts"""
     __tablename__ = 'Users'
@@ -46,7 +90,6 @@ class User(db.Model):
     
     def invalidate_tokens(self):
         self.TokenVersion += 1
-        db.session.commit()
     
     def to_dict(self):
         return {
@@ -93,9 +136,11 @@ class ProcessingJobHistory(db.Model):
     JobType = db.Column(db.Enum(JobType), nullable=False)
     
     UploadFileName = db.Column(db.String(255))
-    UploadFileData = db.Column(LONGBLOB, nullable=True) 
+    UploadFileData = db.Column(LONGBLOB, nullable=True)
+    UploadFileServerPath = db.Column(db.String(500), nullable=True)
     OutputFileName = db.Column(db.String(255))
     OutputFileData = db.Column(LONGBLOB, nullable=True)
+    OutputFileServerPath = db.Column(db.String(500), nullable=True)
     
     FontFamily = db.Column(db.String(50), default='Calibri')
     FontSize = db.Column(db.Integer, default=11)
@@ -103,8 +148,9 @@ class ProcessingJobHistory(db.Model):
     IncludeTOC = db.Column(db.Boolean, default=False)
     
     ProcessingCount = db.Column(db.Integer, default=1, nullable=False)
-    Summary = db.Column(db.Text, nullable=True)
-    LastEditedDate = db.Column(db.DateTime, nullable=True)
+    ProcessingTime = db.Column(db.Float, nullable=True) # [NEW] Persist real duration
+    CreatedBy = db.Column(db.Integer, db.ForeignKey('Users.Id'), nullable=False)
+    ModifiedBy = db.Column(db.Integer, db.ForeignKey('Users.Id'), nullable=False)
     
     Status = db.Column(db.Enum(JobStatus), default=JobStatus.PROCESSING)
     ErrorMessage = db.Column(db.Text)
@@ -112,33 +158,56 @@ class ProcessingJobHistory(db.Model):
     CreatedDate = db.Column(db.DateTime, default=datetime.utcnow)
     ModifiedDate = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    @property
+    def UploadFilePath(self):
+        """Backward-compatible alias for the server path field."""
+        return self.UploadFileServerPath
+
+    @UploadFilePath.setter
+    def UploadFilePath(self, value):
+        self.UploadFileServerPath = value
+
+    @property
+    def OutputFilePath(self):
+        """Backward-compatible alias for the server path field."""
+        return self.OutputFileServerPath
+
+    @OutputFilePath.setter
+    def OutputFilePath(self, value):
+        self.OutputFileServerPath = value
+
     def to_dict(self, include_file_data=False):
         """Serializes history for the chat window UI"""
+        job_type_val = self.JobType.value if hasattr(self.JobType, 'value') else self.JobType
+        status_val = self.Status.value if hasattr(self.Status, 'value') else self.Status
+        
         data = {
             'id': self.Id,
             'jobId': self.ProcessJobId,
-            'type': self.JobType.value if hasattr(self.JobType, 'value') else self.JobType,
-            'summary': self.Summary,
+            'type': job_type_val,
             'processingCount': self.ProcessingCount,
             'fontFamily': self.FontFamily,
             'fontSize': self.FontSize,
             'includeCover': self.IncludeCover,
             'includeTOC': self.IncludeTOC,
-            'status': self.Status.value if hasattr(self.Status, 'value') else self.Status,
+            'status': status_val,
             'errorMessage': self.ErrorMessage,
+            'processingTime': self.ProcessingTime,
             'timestamp': self.CreatedDate.strftime("%I:%M %p") if self.CreatedDate else '',
             'createdDate': self.CreatedDate.isoformat() if self.CreatedDate else None,
+            'createdBy': self.CreatedBy,
+            'modifiedBy': self.ModifiedBy,
             'uploadFileName': self.UploadFileName,
+            'rawText': None,
             'downloadUrl': f'/api/process/download/{self.Id}'
         }
 
-        if include_file_data and self.UploadFileData:
-            job_type_val = self.JobType.value if hasattr(self.JobType, 'value') else self.JobType
-            if job_type_val == 'Text':
-                try:
-                    data['rawText'] = self.UploadFileData.decode('utf-8')
-                except (UnicodeDecodeError, AttributeError):
-                    data['rawText'] = str(self.UploadFileData)
+        # Handle raw text decoding for text-based jobs
+        if self.UploadFileData and job_type_val == 'Text':
+            try:
+                data['rawText'] = self.UploadFileData.decode('utf-8')
+            except (UnicodeDecodeError, AttributeError):
+                data['rawText'] = str(self.UploadFileData)
 
         return data
 
@@ -148,4 +217,85 @@ def init_db(app):
     db.init_app(app)
     with app.app_context():
         db.create_all()
-        print("✓ Database tables created/updated successfully")
+        _ensure_runtime_columns()
+        _ensure_default_settings()
+        logger.info("Database tables created/updated successfully")
+
+
+def _ensure_runtime_columns():
+    """Best-effort schema patching for existing environments without migrations."""
+    inspector = inspect(db.engine)
+
+    if 'ProcessingJobsHistory' in inspector.get_table_names():
+        columns = {col['name'] for col in inspector.get_columns('ProcessingJobsHistory')}
+        ddl = []
+        if 'UploadFileServerPath' not in columns:
+            ddl.append("ALTER TABLE ProcessingJobsHistory ADD COLUMN UploadFileServerPath VARCHAR(500) NULL")
+        if 'OutputFileServerPath' not in columns:
+            ddl.append("ALTER TABLE ProcessingJobsHistory ADD COLUMN OutputFileServerPath VARCHAR(500) NULL")
+        if 'CreatedBy' not in columns:
+            ddl.append("ALTER TABLE ProcessingJobsHistory ADD COLUMN CreatedBy INT NULL")
+        if 'ModifiedBy' not in columns:
+            ddl.append("ALTER TABLE ProcessingJobsHistory ADD COLUMN ModifiedBy INT NULL")
+        if ddl:
+            with db.engine.begin() as conn:
+                for stmt in ddl:
+                    conn.execute(text(stmt))
+                if 'UploadFilePath' in columns and 'UploadFileServerPath' not in columns:
+                    conn.execute(
+                        text(
+                            "UPDATE ProcessingJobsHistory "
+                            "SET UploadFileServerPath = UploadFilePath "
+                            "WHERE UploadFilePath IS NOT NULL AND UploadFileServerPath IS NULL"
+                        )
+                    )
+                if 'OutputFilePath' in columns and 'OutputFileServerPath' not in columns:
+                    conn.execute(
+                        text(
+                            "UPDATE ProcessingJobsHistory "
+                            "SET OutputFileServerPath = OutputFilePath "
+                            "WHERE OutputFilePath IS NOT NULL AND OutputFileServerPath IS NULL"
+                        )
+                    )
+                if 'CreatedBy' not in columns:
+                    conn.execute(
+                        text(
+                            "UPDATE ProcessingJobsHistory h "
+                            "JOIN ProcessingJobs j ON j.Id = h.ProcessJobId "
+                            "SET h.CreatedBy = j.UserId "
+                            "WHERE h.CreatedBy IS NULL"
+                        )
+                    )
+                if 'ModifiedBy' not in columns:
+                    conn.execute(
+                        text(
+                            "UPDATE ProcessingJobsHistory h "
+                            "JOIN ProcessingJobs j ON j.Id = h.ProcessJobId "
+                            "SET h.ModifiedBy = j.UserId "
+                            "WHERE h.ModifiedBy IS NULL"
+                        )
+                    )
+
+
+def _ensure_default_settings():
+    """Create required default settings for first-run environments."""
+    if not Settings.query.filter_by(VariableName='UPLOAD_FILE_MODE').first():
+        db.session.add(
+            Settings(
+                VariableName='UPLOAD_FILE_MODE',
+                VariableValue='Both',
+                Description='Controls where uploaded files are stored.'
+            )
+        )
+        db.session.commit()
+
+
+def get_upload_file_mode(default='BOTH'):
+    """Return the configured upload mode, falling back to the provided default."""
+    try:
+        mode = Settings.get_upload_mode()
+    except Exception as exc:
+        logger.warning("Falling back to default upload mode due to settings lookup error: %s", exc)
+        mode = (default or 'BOTH').strip().upper()
+
+    return mode if mode in {'FILE', 'DB', 'BOTH'} else 'BOTH'

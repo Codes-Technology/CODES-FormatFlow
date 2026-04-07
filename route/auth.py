@@ -2,6 +2,8 @@
 Authentication routes for user login, logout, and profile retrieval.
 """
 
+import logging
+
 from utils.decorators import require_auth
 from flask import Blueprint, request, jsonify, make_response
 from flask_jwt_extended import create_access_token, set_access_cookies, unset_jwt_cookies
@@ -10,6 +12,7 @@ from config import APP_INSTANCE_ID
 from datetime import timedelta
 
 auth_bp = Blueprint('auth', __name__)
+logger = logging.getLogger(__name__)
 
 @auth_bp.route('/login', methods=['POST'])
 def login():
@@ -18,10 +21,12 @@ def login():
         if not data or not all(k in data for k in ['email', 'password']):
             return jsonify({'success': False, 'error': 'Missing email or password'}), 400
         
-        user = User.query.filter_by(Email=data['email'].lower().strip()).first()
+        email = data['email'].lower().strip()
+        password = data['password']
+        user = User.query.filter_by(Email=email).first()
         
-        if not user or not user.check_password(data['password']):
-            return jsonify({'success': False, 'error': 'Invalid credentials'}), 401
+        if not user or not user.check_password(password):
+            return jsonify({'success': False, 'error': 'Wrong password'}), 401
         
         if not user.IsActive:
             return jsonify({'success': False, 'error': 'Account disabled'}), 403
@@ -45,7 +50,8 @@ def login():
         return response, 200
         
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)}), 500
+        logger.error("Login failed: %s", e, exc_info=True)
+        return jsonify({'success': False, 'error': 'Login failed. Please try again.'}), 500
 
 @auth_bp.route('/logout', methods=['POST'])
 @require_auth

@@ -998,24 +998,73 @@
             margin-inline: auto;
         }
 
-        /* Error toast */
+        /* Toast notifications */
         #toast {
             position: fixed;
             bottom: 80px;
             left: 50%;
             transform: translateX(-50%);
-            background: #c0392b;
+            background: rgba(0, 0, 0, 0.85); /* Default dark/neutral */
             color: #fff;
-            padding: 10px 20px;
-            border-radius: 10px;
-            font-size: 0.85rem;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-size: 0.9rem;
             display: none;
-            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
-            z-index: 999;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+            z-index: 9999;
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: opacity 0.3s ease;
+        }
+
+        #toast.success {
+            background: #27ae60; /* Professional green */
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        #toast.error {
+            background: #c0392b; /* Safety red */
+            border-color: rgba(255, 255, 255, 0.2);
+        }
+
+        #toast.info {
+            background: var(--accent); /* Brand blue */
+            border-color: rgba(255, 255, 255, 0.2);
         }
 
         .hidden {
             display: none !important;
+        }
+        /* ----------------------------------- */
+        /* 📊 BOT CHAT BUBBLE TABLE STYLING   */
+        /* ----------------------------------- */
+        .bot-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 12px 0;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .bot-content th, 
+        .bot-content td {
+            border: 1px solid var(--border);
+            padding: 10px 14px;
+            text-align: left;
+            font-size: 0.875rem;
+        }
+
+        .bot-content th {
+            background-color: rgba(255, 255, 255, 0.08); 
+            font-weight: 600;
+            color: var(--accent);
+        }
+
+        .bot-content td strong {
+            color: var(--accent);
+            font-weight: 600;
         }
     </style>
 </head>
@@ -1138,6 +1187,11 @@
                 </div>
 
                 <div class="input-controls">
+                    <!-- Cancel Edit Button (Initially Hidden) -->
+                    <button id="cancelEditBtn" onclick="cancelEdit()" class="hidden" title="Cancel Edit"
+                        style="background:none; border:1px solid #c0392b; color:#c0392b; border-radius:18px; padding:6px 14px; font-size:0.75rem; font-weight:600; cursor:pointer; margin-right:8px;">
+                        CANCEL EDIT
+                    </button>
                     <!-- Only the send button remains (Attach button removed since we use Mode toggle) -->
                     <button id="sendBtn" onclick="processEntry()" disabled title="Send">
                         <i class="bi bi-arrow-up"></i>
@@ -1159,6 +1213,8 @@
             currentMode: 'text',
             selectedFile: null,
             currentJobId: null,
+            editingHistoryId: null, // Tracks which message is being edited
+            editingUserDataId: null, // Tracks the DOM ID of the edited message row
             isTitleLocked: false,
             editorInstance: null,
             isFirstLoad: true,
@@ -1167,6 +1223,7 @@
             elements: {
                 textInput: document.getElementById('textInput'),
                 sendBtn: document.getElementById('sendBtn'),
+                cancelEditBtn: document.getElementById('cancelEditBtn'), // [NEW] Cancel button
                 inputArea: document.getElementById('input-area'),
                 display: document.getElementById('message-display'),
                 chatScroll: document.getElementById('chat-scroll'),
@@ -1306,6 +1363,24 @@
             const btn = FormatApp.elements.sendBtn;
             if (!btn) return;
             
+            // ✏️ UPDATE CANCEL BUTTON VISIBILITY
+            const cancelBtn = FormatApp.elements.cancelEditBtn;
+            if (cancelBtn) {
+                if (FormatApp.editingHistoryId) {
+                    cancelBtn.classList.remove('hidden');
+                    cancelBtn.style.display = 'inline-block';
+                } else {
+                    cancelBtn.classList.add('hidden');
+                    cancelBtn.style.display = 'none';
+                }
+            }
+
+            // ✏️ UPDATE SEND ICON (Arrow-Up for New, Arrow-Up-Square for Edit)
+            const sendIcon = btn.querySelector('i');
+            if (sendIcon) {
+                sendIcon.className = FormatApp.editingHistoryId ? 'bi bi-arrow-up-square' : 'bi bi-arrow-up';
+            }
+
             if (FormatApp.currentMode === 'text') {
                 if (FormatApp.editorInstance) {
                     btn.disabled = FormatApp.editorInstance.getContent({ format: 'text' }).trim().length === 0;
@@ -1361,10 +1436,12 @@
                 if (els.fileLabel) els.fileLabel.textContent = file.name;
                 if (els.fileBadge) els.fileBadge.classList.add('visible');
 
-                // Dynamic title update for files
-                const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
-                updateActiveSidebarTitle(nameWithoutExt);
-                FormatApp.isTitleLocked = true;
+                // Dynamic title update for files - ONLY if this is a NEW chat
+                if (!FormatApp.currentJobId) {
+                    const nameWithoutExt = file.name.replace(/\.[^/.]+$/, '');
+                    updateActiveSidebarTitle(nameWithoutExt);
+                    FormatApp.isTitleLocked = true;
+                }
             }
             updateSendState();
         }
@@ -1416,8 +1493,8 @@
             }
 
             const userDataId = 'usr-' + Date.now();
-            const userLabel = FormatApp.currentMode === 'file' ? `📄 Processed File: ${FormatApp.selectedFile.name}` : rawContent;
-            appendMessage(userLabel, 'user', FormatApp.currentMode === 'file', null, userDataId);
+            const userLabel = FormatApp.currentMode === 'file' ? `📄 File: ${FormatApp.selectedFile.name}` : rawContent;
+            appendMessage(userLabel, 'user', FormatApp.currentMode === 'file', null, userDataId, '', 1, htmlContent);
 
             if (FormatApp.currentMode === 'text' && FormatApp.editorInstance) {
                 FormatApp.editorInstance.setContent('');
@@ -1432,11 +1509,24 @@
 
             if (FormatApp.currentMode === 'file') {
                 clearFile();
+            } else if (FormatApp.editingHistoryId) {
+                // If it was an edit, clear the edit state after success
+                cancelEdit();
             }
         }
 
         // ── BACKEND CALL ───────────────────────────────────────
         async function triggerBackend(htmlContent, hasFile, botId, txtContent, userDataId) {
+            // ✏️ CLEAR EDIT STATE IMMEDIATELY ON SEND
+            const wasEditing = !!FormatApp.editingHistoryId;
+            const editingId = FormatApp.editingHistoryId;
+            const parentId = FormatApp.editingUserDataId; // The DOM ID of the parent (original) message
+            
+            if (wasEditing) {
+                // Clear the UI and internal flags so the next message is "new"
+                cancelEdit();
+            }
+
             const getControl = (id) => document.getElementById(id);
             const settings = {
                 fontFamily: getControl('fontFamily')?.value || 'Calibri',
@@ -1463,7 +1553,10 @@
                     });
                     result = await r.json();
                 } else {
-                    const r = await fetch('/api/process/process-text', {
+                    // ✏️ CHECK FOR EDIT MODE (using locals captured before cancelEdit)
+                    const url = wasEditing ? `/api/process/edit-text/${editingId}` : '/api/process/process-text';
+                    
+                    const r = await fetch(url, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ 
@@ -1500,31 +1593,35 @@
                         if (editBtn) {
                             editBtn.disabled = false;
                             editBtn.style.opacity = '1';
-                            // RETROACTIVELY SET THE ONCLICK HANDLER
-                            editBtn.setAttribute('onclick', `editText(${result.historyId}, this)`);
+                            // Store the historyId and raw HTML content for later editing
+                            editBtn.dataset.historyId = result.historyId;
+                            editBtn.dataset.rawHtml = htmlContent || '';
                         }
                         const counter = uRow.querySelector('.processed-counter');
                         if (counter && result.processingCount) {
                             counter.textContent = result.processingCount;
                         }
                     }
+
+                    // 🟠 REFRESH PARENT COUNTER AS WELL
+                    if (parentId) {
+                        const pRow = document.getElementById(parentId);
+                        if (pRow) {
+                            const pCounter = pRow.querySelector('.processed-counter');
+                            if (pCounter && result.processingCount) {
+                                pCounter.textContent = result.processingCount;
+                            }
+                        }
+                    }
                 }
 
-                // FIX B6: Capture filename BEFORE clearFile() nulls it
                 const fileLabel = hasFile && FormatApp.selectedFile ? FormatApp.selectedFile.name : null;
                 const labelStr = hasFile ? (fileLabel || 'Document') : txtContent;
                 replaceBotBubble(botId, result, settings, labelStr);
 
                 if (result.success) {
-                    FormatApp.currentJobId = result.jobId;
-
-                    // Reload sidebar — preserves existing job names from DB
+                    // Reload sidebar to reflect any name changes
                     await loadSidebar();
-
-                    // Re-highlight active conversation
-                    document.querySelectorAll('.conv-item').forEach(i => i.classList.remove('active'));
-                    const activeItem = document.querySelector(`.conv-item[data-id="${FormatApp.currentJobId}"]`);
-                    if (activeItem) activeItem.classList.add('active');
                 }
             } catch (err) {
                 replaceBotError(botId, 'Network error. Please try again.');
@@ -1534,7 +1631,7 @@
         }
 
         // ── RENDER HELPERS ─────────────────────────────────────
-        function appendMessage(text, type, isFile = false, historyId = null, userDataId = null, timeStr = '', processingCount = 1) {
+        function appendMessage(text, type, isFile = false, historyId = null, userDataId = null, timeStr = '', processingCount = 1, rawHtml = null) {
             const row = document.createElement('div');
             row.className = `msg-row ${type}`;
             if (userDataId) row.id = userDataId;
@@ -1547,7 +1644,7 @@
             bub.className = `bubble ${type}`;
 
             if (type === 'bot') {
-                bub.innerHTML = `<div class="bot-name">FormatFlow AI</div><div>${text}</div>`;
+                bub.innerHTML = `<div class="bot-name">FormatFlow AI</div><div class="bot-content">${text}</div>`;
             } else {
                 // Always render user text with edit capability
                 // historyId may be null initially; the retroactive update sets it after processing
@@ -1589,7 +1686,9 @@
                         </div>
                         <button class="edit-btn" title="Edit message"
                             style="background:none; border:none; padding:0; cursor:pointer; color:inherit; display:flex; align-items:center; gap:4px; font-weight:500;"
-                            ${historyId ? '' : 'disabled'}>
+                            ${historyId ? '' : 'disabled'}
+                            data-history-id="${historyId || ''}"
+                            data-raw-html="${escapeHtml(rawHtml || '')}">
                             <i class="bi bi-pencil"></i>
                             <span>Edit</span>
                         </button>
@@ -1650,11 +1749,11 @@
             const bub = row.querySelector('.bubble.bot');
 
             if (result.success) {
-                // CLEAN BOT RESPONSE (NO REPEATING USER TEXT)
+                // RENDER AI FEEDBACK (Including summary tables)
                 bub.innerHTML = `
                     <div class="bot-name">FormatFlow AI</div>
-                    <div class="bot-text">
-                        Your document has been formatted successfully.
+                    <div class="bot-content">
+                        ${result.botResponse || 'Your document has been formatted successfully.'}
                     </div>
                 `;
                 
@@ -1667,10 +1766,17 @@
                 renderResultCard(result);
 
             } else {
+                let errorMsg = result.error;
+                if (!errorMsg && result.isProcessing) {
+                    errorMsg = 'Processing was interrupted or is still pending.';
+                } else if (!errorMsg) {
+                    errorMsg = 'Something went wrong.';
+                }
+
                 bub.innerHTML = `
                     <div class="bot-name">FormatFlow AI</div>
                     <div style="color:#e06c75;">
-                        ⚠ ${result.error || 'Something went wrong.'}
+                        ⚠ ${errorMsg}
                     </div>
                 `;
             }
@@ -1725,18 +1831,6 @@
         }
 
 
-        // SCROLL HANDLER
-        function scrollToBottom() {
-            FormatApp.elements.chatScroll.scrollTop = FormatApp.elements.chatScroll.scrollHeight;
-        }
-
-
-        // SAFE HTML ESCAPE
-        function escapeHtml(text) {
-            const d = document.createElement('div');
-            d.textContent = text;
-            return d.innerHTML;
-        }
 
 
         // UPDATE SIDEBAR TITLE (NO CHANGE NEEDED - JUST CLEANED)
@@ -1892,7 +1986,6 @@
                 if (res.success) {
                     const item = document.querySelector(`.conv-item[data-id="${id}"]`);
                     if (item) item.remove();
-                    // FIX B3: Use == for type-coercion comparison (id is number, currentJobId is string)
                     if (String(FormatApp.currentJobId) === String(id)) newChat();
                 } else {
                     showToast(res.error || "Failed to delete");
@@ -1972,7 +2065,7 @@
                 // ✅ Render history properly
                 for (let msg of history) {
                     let displayText = '';
-                    const isFile = msg.type === 'File' || msg.Type === 'File';
+                    const isFile = msg.type && msg.type.toLowerCase() === 'file';
                     
                     if (isFile) {
                         displayText = msg.uploadFileName || 'Document';
@@ -1988,14 +2081,17 @@
                     
                     // Render user message
                     const metaTime = msg.timestamp || msg.Timestamp || msg.CreatedDate || '';
-                    appendMessage(displayText, 'user', isFile, msg.id, null, metaTime, msg.processingCount || msg.ProcessingCount || 1);
+                    appendMessage(displayText, 'user', isFile, msg.id, null, metaTime, msg.processingCount || msg.ProcessingCount || 1, msg.rawText);
 
                     // Render bot response
+                    const isProcessing = msg.status === 'Processing' || msg.Status === 'Processing';
                     const mock_result = {
                         success: msg.status === 'Success' || msg.Status === 'Success',
+                        isProcessing: isProcessing,
                         historyId: msg.id,
-                        error: msg.errorMessage || msg.ErrorMessage,
-                        processingTime: '2s',
+                        error: isProcessing ? 'Processing was interrupted or is still pending.' : (msg.errorMessage || msg.ErrorMessage),
+                        botResponse: msg.botResponse,
+                        processingTime: msg.processingTime || msg.ProcessingTime || null,
                         time: metaTime
                     };
                     
@@ -2096,13 +2192,22 @@
         }
 
         // ── TOAST ──────────────────────────────────────────────
-        function showToast(msg, ms = 3000) {
+        function showToast(msg, type = 'info', ms = 3000) {
             const t = document.getElementById('toast');
-            t.textContent = msg; t.style.display = 'block';
-            setTimeout(() => t.style.display = 'none', ms);
+            if (!t) return;
+            
+            t.textContent = msg;
+            t.className = ''; // Reset
+            t.classList.add(type);
+            t.style.display = 'block';
+            t.style.opacity = '1';
+            
+            setTimeout(() => {
+                t.style.opacity = '0';
+                setTimeout(() => { t.style.display = 'none'; }, 300);
+            }, ms);
         }
         // ── PDF DOWNLOAD HANDLER ──────────────────────────────
-        // FIX B7: Accept event as parameter instead of using global deprecated `event`
         async function downloadPDF(historyId, evt) {
             const btn = (evt && evt.currentTarget) || document.activeElement;
             const originalHTML = btn.innerHTML;
@@ -2118,7 +2223,6 @@
                     throw new Error(errorData.error || 'Conversion failed');
                 }
 
-                // Get the blob and download it
                 const blob = await response.blob();
                 const url = window.URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -2133,165 +2237,76 @@
                 btn.disabled = false;
             } catch (err) {
                 console.error(err);
-                showToast(err.message, 5000);
+                showToast(err.message, 'error', 5000);
                 btn.innerHTML = originalHTML;
                 btn.disabled = false;
             }
         }
+
         document.addEventListener('click', async (e) => {
-            // ✏️ EDIT CLICK
-            const editTarget = e.target.closest('.edit-btn');
-            if (editTarget) {
+            // ✏️ LOAD INTO EDITOR (New Workflow)
+            const editBtn = e.target.closest('.edit-btn');
+            if (editBtn) {
                 e.preventDefault();
                 e.stopPropagation();
 
-                const wrapper = editTarget.closest('.user-bubble-wrapper');
-                if (!wrapper) return;
-
-                const textContainer = wrapper.querySelector('.user-text-container');
-                if (!textContainer) return;
-
-                const historyId = textContainer.dataset.historyId;
-                if (!historyId) {
-                    showToast('This message cannot be edited yet — please wait for processing to complete.');
+                const rawHtmlEncoded = editBtn.dataset.rawHtml || '';
+                if (!rawHtmlEncoded) {
+                    showToast('This message cannot be edited (missing content).');
                     return;
                 }
 
-                const textDiv = textContainer.querySelector('.user-text');
-                const originalText = textDiv.innerText.trim();
-                textDiv.dataset.oldText = originalText;
+                // Get raw HTML from attribute
+                const rawHtml = editBtn.dataset.rawHtml || '';
 
-                // Build edit UI
-                textDiv.innerHTML = '';
+                // LOCK EDIT STATE
+                FormatApp.editingHistoryId = editBtn.dataset.historyId;
+                FormatApp.editingUserDataId = editBtn.closest('.msg-row').id;
+                
+                // 1. Switch to text mode
+                if (FormatApp.currentMode !== 'text') switchMode('text');
 
-                const ta = document.createElement('textarea');
-                ta.className = 'edit-area';
-                ta.style.cssText = `
-                    width: 100%; 
-                    min-height: 140px; 
-                    background: var(--surface-2); 
-                    color: var(--text); 
-                    border: 1.5px solid var(--accent); 
-                    border-radius: 12px; 
-                    padding: 14px; 
-                    font-family: inherit; 
-                    font-size: 0.92rem; 
-                    resize: vertical; 
-                    box-sizing: border-box; 
-                    line-height: 1.6; 
-                    display: block;
-                    outline: none;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                `;
-                ta.value = originalText;
-
-                const btnRow = document.createElement('div');
-                btnRow.style.cssText = 'margin-top: 12px; display: flex; gap: 10px; justify-content: flex-end; align-items: center;';
-
-                const cancelBtn = document.createElement('button');
-                cancelBtn.className = 'dl-btn secondary';
-                cancelBtn.textContent = 'Cancel';
-                cancelBtn.onclick = null;  // FIX B8: Will be properly set below after bubble reference is available
-
-                const saveBtn = document.createElement('button');
-                saveBtn.className = 'dl-btn primary';
-                saveBtn.textContent = 'Save & Resubmit';
-                saveBtn.onclick = async (ev) => {
-                    ev.stopPropagation();
-                    const newText = ta.value.trim();
-                    if (!newText) { showToast('Text cannot be empty.'); return; }
-
-                    // Restore UI immediately
-                    textDiv.innerHTML = '';
-                    textDiv.innerText = newText;
-                    const userMeta = wrapper.querySelector('.user-meta');
-                    if (userMeta) userMeta.style.display = 'flex';
-
-                    saveBtn.disabled = true;
-                    saveBtn.textContent = 'Saving...';
-
-                    try {
-                        const r = await fetch(`/api/process/edit-text/${historyId}`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ text: newText }),
-                            credentials: 'include'
-                        });
-
-                        const result = await r.json();
-
-                        if (result.success) {
-                            // IMPORTANT: Update the DOM with the NEW history ID for next edits
-                            textContainer.dataset.historyId = result.historyId;
-
-                            const counter = wrapper.querySelector('.processed-counter');
-                            if (counter && result.processingCount) {
-                                counter.innerText = result.processingCount;
-                            }
-
-                            // UPDATE: Refresh the timestamp to the current processing time
-                            const timeSpan = wrapper.querySelector('.user-meta span:first-child');
-                            if (timeSpan && result.time) {
-                                timeSpan.innerText = toIST(result.time);
-                            }
-                            const botId = 'edit-reply-' + Date.now();
-                            appendTyping(botId);
-                            const mock_settings = {
-                                fontFamily: document.getElementById('fontFamily').value,
-                                fontSize: parseInt(document.getElementById('fontSize').value) || 11
-                            };
-                            replaceBotBubble(botId, result, mock_settings, newText);
-                        } else {
-                            throw new Error(result.error || 'Edit failed');
-                        }
-                    } catch (err) {
-                        console.error('Edit error:', err);
-                        showToast('Edit failed: ' + err.message);
-                        // Restore original text on failure
-                        textDiv.innerText = textDiv.dataset.oldText || '';
-                    }
-                };
-
-                btnRow.appendChild(cancelBtn);
-                btnRow.appendChild(saveBtn);
-                textDiv.appendChild(ta);
-                textDiv.appendChild(btnRow);
-
-                const userMeta = wrapper.querySelector('.user-meta');
-                if (userMeta) userMeta.style.display = 'none';
-
-                // Expand bubble to full width during edit
-                const bubble = wrapper.querySelector('.bubble.user');
-                if (bubble) {
-                    bubble.style.maxWidth = '100%';
-                    bubble.style.width = '100%';
-                    bubble.style.padding = '8px';
-                    bubble.style.background = 'transparent';
-                    bubble.style.border = 'none';
+                // 2. Load into TinyMCE
+                if (FormatApp.editorInstance) {
+                    FormatApp.editorInstance.setContent(rawHtml);
                 }
 
-                // Allow wrapper to grow to full width
-                wrapper.style.width = '100%';
-
-                cancelBtn.onclick = (ev) => {
-                    ev.stopPropagation();
-                    textDiv.innerHTML = '';
-                    textDiv.innerText = textDiv.dataset.oldText || '';
-                    if (userMeta) userMeta.style.display = 'flex';
-                    if (bubble) {
-                        bubble.style.maxWidth = '80%';
-                        bubble.style.width = 'auto'; // Reset to original
-                        bubble.style.padding = '11px 16px';
-                        bubble.style.background = 'var(--user-bubble)';
-                        bubble.style.border = '1px solid var(--border)';
-                    }
-                    wrapper.style.width = 'auto'; // Reset to original
-                };
-
-                setTimeout(() => ta.focus(), 50);
-                return;
+                // 3. Clear UI "Welcome" state if needed and scroll
+                if (FormatApp.elements.inputArea.classList.contains('centered')) {
+                    FormatApp.elements.inputArea.classList.remove('centered');
+                    if (FormatApp.elements.welcome) FormatApp.elements.welcome.style.display = 'none';
+                }
+                
+                FormatApp.elements.inputArea.scrollIntoView({ behavior: 'smooth' });
+                
+                // Reactive UI update (will show cancel button and update icon)
+                updateSendState();
+                showToast('Content loaded for editing.', 'info');
             }
         });
+
+        // ── CANCEL EDIT ──────────────────────────────────────────
+
+        // ── CANCEL EDIT ──────────────────────────────────────────
+        function cancelEdit() {
+            FormatApp.editingHistoryId = null;
+            FormatApp.editingUserDataId = null;
+            
+            // Reset Editor
+            if (FormatApp.editorInstance) {
+                FormatApp.editorInstance.setContent('');
+            }
+
+            // Reactively update the UI (hides button, resets icon)
+            updateSendState();
+        }
+        // ── UTILS ──────────────────────────────────────────────
+        function scrollToBottom() {
+            if (FormatApp.elements.chatScroll) {
+                FormatApp.elements.chatScroll.scrollTop = FormatApp.elements.chatScroll.scrollHeight;
+            }
+        }
+
         // SAFE HTML ESCAPE
         function escapeHtml(text) {
             if (!text) return '';

@@ -7,9 +7,15 @@ from docx import Document
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import RGBColor
+import logging
+import os
+
+logger = logging.getLogger(__name__)
 
 
 class TocManager:
+    def __init__(self, font_family: str = 'Calibri'):
+        self.font_family = font_family
 
     def insert_toc(self, doc: Document):
         """Insert a Word-native TOC at the top of the document."""
@@ -78,7 +84,7 @@ class TocManager:
         body.insert(0, title_para)   # inserted 1st → index 0
 
         self._enable_auto_update(doc)
-        print('[TocManager] ✓ Native Word TOC inserted')
+        logger.info('[TocManager] Native Word TOC inserted')
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # TITLE PARAGRAPH
@@ -108,8 +114,8 @@ class TocManager:
         rPr.append(color)
 
         fonts = OxmlElement('w:rFonts')
-        fonts.set(qn('w:ascii'), 'Calibri')
-        fonts.set(qn('w:hAnsi'), 'Calibri')
+        fonts.set(qn('w:ascii'), self.font_family)
+        fonts.set(qn('w:hAnsi'), self.font_family)
         rPr.append(fonts)
 
         sz = OxmlElement('w:sz')
@@ -144,7 +150,7 @@ class TocManager:
 
             style.font.color.rgb = RGBColor(0, 0, 0)
             style.font.underline = False
-            style.font.name = 'Calibri'
+            style.font.name = self.font_family
 
             # Also write directly to XML to defeat Hyperlink style inheritance
             style_elem = style.element
@@ -196,3 +202,61 @@ class TocManager:
             settings.append(uf)
         except Exception:
             pass
+
+    def refresh_toc_page_numbers(self, docx_path: str) -> bool:
+        """
+        Use Word automation on Windows to paginate and update the TOC so page
+        numbers reflect the actual saved document layout.
+        """
+        if not docx_path or not os.path.exists(docx_path):
+            return False
+
+        try:
+            import pythoncom
+            from win32com.client import DispatchEx
+        except Exception as exc:
+            logger.warning(f'[TocManager] Word automation unavailable: {exc}')
+            return False
+
+        word = None
+        doc = None
+        try:
+            pythoncom.CoInitialize()
+            word = DispatchEx('Word.Application')
+            word.Visible = False
+            word.DisplayAlerts = 0
+
+            doc = word.Documents.Open(docx_path, ReadOnly=False)
+            doc.Repaginate()
+
+            try:
+                doc.Fields.Update()
+            except Exception:
+                pass
+
+            try:
+                for toc in doc.TablesOfContents:
+                    toc.Update()
+            except Exception:
+                pass
+
+            doc.Save()
+            return True
+        except Exception as exc:
+            logger.warning(f'[TocManager] Failed to refresh TOC in Word: {exc}')
+            return False
+        finally:
+            if doc is not None:
+                try:
+                    doc.Close(SaveChanges=True)
+                except Exception:
+                    pass
+            if word is not None:
+                try:
+                    word.Quit()
+                except Exception:
+                    pass
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass

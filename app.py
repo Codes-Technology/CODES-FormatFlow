@@ -2,11 +2,17 @@
 Main application file with JWT authentication and Session Reset
 """
 from datetime import timedelta
+import os
 from flask import Flask, jsonify, render_template, redirect, request, url_for, make_response
 from flask_jwt_extended import JWTManager, verify_jwt_in_request, get_jwt_identity, get_jwt, unset_jwt_cookies
 from flask_cors import CORS
-from config import SQLALCHEMY_DATABASE_URI, SQLALCHEMY_TRACK_MODIFICATIONS, APP_INSTANCE_ID 
+from config import SQLALCHEMY_DATABASE_URI, SQLALCHEMY_TRACK_MODIFICATIONS, APP_INSTANCE_ID, SECRET_KEY
 from utils.db_manager import init_db
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
    
@@ -18,13 +24,13 @@ app.config['SQLALCHEMY_DATABASE_URI'] = SQLALCHEMY_DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = SQLALCHEMY_TRACK_MODIFICATIONS
 
 # Every restart = new key = old cookies invalid = login required
-app.config['SECRET_KEY'] = APP_INSTANCE_ID
-app.config['JWT_SECRET_KEY'] = APP_INSTANCE_ID
+app.config['SECRET_KEY'] = SECRET_KEY
+app.config['JWT_SECRET_KEY'] = SECRET_KEY
 
 app.config['JWT_TOKEN_LOCATION'] = ['cookies']
 app.config['JWT_COOKIE_HTTPONLY'] = True
-app.config['JWT_COOKIE_SECURE'] = False
-app.config['JWT_COOKIE_CSRF_PROTECT'] = False
+app.config['JWT_COOKIE_SECURE'] = os.getenv('JWT_COOKIE_SECURE', 'false').lower() == 'true'
+app.config['JWT_COOKIE_CSRF_PROTECT'] = os.getenv('JWT_COOKIE_CSRF_PROTECT', 'false').lower() == 'true'
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)  # ← Bug 2 fix: was int not timedelta
 
 jwt = JWTManager(app)
@@ -55,7 +61,7 @@ def index():
         token_instance = claims.get('instance_id')
         
         if token_instance != APP_INSTANCE_ID:
-            print("❌ Instance mismatch — forcing re-login")
+            logger.warning("Instance mismatch — forcing re-login")
             response = make_response(redirect(url_for('login_page')))
             unset_jwt_cookies(response)
             return response
@@ -67,7 +73,7 @@ def index():
         return response
 
     except Exception as e:
-        print(f"❌ Authentication error: {e}")
+        logger.error(f"Authentication error: {e}")
         return redirect(url_for('login_page'))
 
 
@@ -105,4 +111,8 @@ def missing_token_callback(error):
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(
+        debug=os.getenv('FLASK_DEBUG', 'false').lower() == 'true',
+        host='0.0.0.0',
+        port=int(os.getenv('PORT', '5000'))
+    )
