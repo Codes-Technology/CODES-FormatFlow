@@ -66,4 +66,4 @@ FormatFlow is a professional-grade document processing and generation platform d
 > If you encounter PDF conversion errors on Windows, ensure that **Microsoft Word** is installed and accessible, as `docx2pdf` relies on the Word COM interface for high-fidelity conversion.
 
 ---
-*Created with ❤️ for premium document formatting.*
+*Created for premium document formatting.*
